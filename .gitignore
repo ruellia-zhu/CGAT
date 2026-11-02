@@ -1,0 +1,61 @@
+# ============================================================
+#  比较基因组分析 —— 只提交程序本体
+#  基因组数据、分析结果、测试脚本一律不入库
+# ============================================================
+
+# ---- Python / 环境 ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# ---- 构建产物 ----
+build/work/
+dist/
+*.exe
+*.zip
+
+# ---- 运行时生成 ----
+app/resources/preview_live.png
+app/resources/draft.png
+*.log
+
+# ---- 测试与验证脚本：保留在本地，不进仓库 ----
+#（这些脚本依赖本机的 共线性分析 数据集，别人拿走也跑不起来）
+tests/
+tools/check_*.py
+tools/smoke_ui.py
+
+# ---- 绝不提交的生物学数据 ----
+*.fa
+*.fasta
+*.fna
+*.fas
+*.fai
+*.gff
+*.gff3
+*.gtf
+*.len
+*.pep
+*.cds
+*.bed
+*.vcf
+*.blastp.txt
+*.collinearity.txt
+*.ks
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.docx
+
+# ---- 系统杂物 ----
+Thumbs.db
+desktop.ini
+.DS_Store
+runtime/
+bin/
+# 下载缓存与构建输入，不入库
+build/downloads/
