@@ -64,3 +64,8 @@ Thumbs.db
 desktop.ini
 .DS_Store
 build/dl/
+# 构建日志与临时截图
+build/*.log
+build/*.png
+build/*.txt
+tools/_*.py
