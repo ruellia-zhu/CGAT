@@ -290,6 +290,7 @@ class MainWindow(QWidget):
         self.analysis_panel = AnalysisPanel()
         self.analysis_stage = AnalysisStage()
         self.analysis_panel.start_requested.connect(self._start_analysis)
+        self.analysis_panel.notified.connect(self.analysis_stage.append)
         self.analysis_stage.load_requested.connect(self._load_project)
         self.analysis_stage.results_requested.connect(self._show_results)
         self.analysis_stage.cancel_requested.connect(self._cancel_analysis)
@@ -303,6 +304,10 @@ class MainWindow(QWidget):
         self.stage_stack = QStackedWidget()
         self.stage_stack.addWidget(self.analysis_stage)
         self.stage_stack.addWidget(self._build_stage(t))
+        self.panel_stack.setFrameShape(QFrame.NoFrame)
+        self.stage_stack.setFrameShape(QFrame.NoFrame)
+        self.panel_stack.setCurrentIndex(1)
+        self.stage_stack.setCurrentIndex(1)
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -571,19 +576,12 @@ class MainWindow(QWidget):
         self.panel_stack.setCurrentIndex(index)
         self.stage_stack.setCurrentIndex(index)
         if index == 0:
-            for message in self.analysis_panel.messages:
-                self.analysis_stage.append(message)
-            self.analysis_panel.messages.clear()
             self.status_text.setText("全流程分析 · WGDI 0.75 · blastp / muscle / PAML")
         else:
             self._refresh_state()
 
     def _start_analysis(self, project) -> None:
         from ..wgdi import runtime as runtime_mod
-
-        for message in self.analysis_panel.messages:
-            self.analysis_stage.append(message)
-        self.analysis_panel.messages.clear()
 
         rt = runtime_mod.discover()
         if not rt.ok:

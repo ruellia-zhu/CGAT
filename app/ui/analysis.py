@@ -210,11 +210,11 @@ class AnalysisPanel(QWidget):
     """Left side of the analysis page: what to analyse."""
 
     start_requested = Signal(object)
+    notified = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         t = theme.theme()
-        self.messages: list[str] = []
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -321,17 +321,17 @@ class AnalysisPanel(QWidget):
     def build_project(self) -> Project | None:
         missing = self.box_a.missing()
         if missing:
-            self.messages.append("物种 A 还缺：" + "、".join(missing))
+            self.notified.emit("物种 A 还缺：" + "、".join(missing))
             return None
         selb = not self.self_check.isChecked()
         if selb and self.box_b.missing():
-            self.messages.append("物种 B 还缺：" + "、".join(self.box_b.missing()))
+            self.notified.emit("物种 B 还缺：" + "、".join(self.box_b.missing()))
             return None
         for box in (self.box_a, self.box_b):
             for edit in box.fields.values():
                 text = edit.text().strip()
                 if text and not Path(text).exists():
-                    self.messages.append(f"文件不存在：{text}")
+                    self.notified.emit(f"文件不存在：{text}")
                     return None
         base = Path(self.dir_edit.text().strip() or str(default_projects_dir()))
         name = self.name_edit.text().strip() or "analysis"
@@ -343,7 +343,7 @@ class AnalysisPanel(QWidget):
                 engine="diamond" if self.engine.current() == 1 else "blastp",
                 threads=self.threads.value(), app_version=info.VERSION)
         except Exception as exc:  # noqa: BLE001
-            self.messages.append(f"无法创建项目：{exc}")
+            self.notified.emit(f"无法创建项目：{exc}")
             return None
         params = project.params
         project.params = type(params)(**{**params.to_dict(),
