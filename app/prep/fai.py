@@ -21,6 +21,7 @@ from ..core.issues import Issue, WgdiError
 
 INT32_MAX = 2**31 - 1
 DEFAULT_WIDTH = 60
+WIDE_LINE = 100          # >= 100 碱基一行才值得重排
 Progress = Callable[[int, int], None] | None
 
 
@@ -235,7 +236,12 @@ def uniform_width(records: list[FaiRecord], width: int = DEFAULT_WIDTH) -> bool:
 
 
 def needs_rewrap(records: list[FaiRecord], width: int = DEFAULT_WIDTH) -> tuple[bool, str]:
-    """Should the FASTA be re-wrapped before indexing? (why, in plain words)"""
+    """Should the FASTA be re-wrapped before indexing? (why, in plain words)
+
+    Any line width below `WIDE_LINE` is left alone: 50 or 60 columns both index
+    fine, and re-wrapping a 30 GB genome costs minutes for no gain. Only very
+    wide lines (which push the .fai offsets past 32 bits) are normalised.
+    """
     if not records:
         return False, ""
     singles = [r for r in records if r.single_line]
@@ -243,11 +249,11 @@ def needs_rewrap(records: list[FaiRecord], width: int = DEFAULT_WIDTH) -> tuple[
         return True, (f"{len(singles)} 条序列整条写在一行（如 {singles[0].name}，"
                       f"{singles[0].length:,} bp），任何 32 位工具都会读成负数")
     widths = {r.linebases for r in records}
+    if max(widths) < WIDE_LINE:
+        return False, ""
     if len(widths) > 1:
         return True, f"各序列换行宽度不一致：{sorted(widths)[:4]}"
-    if widths != {width}:
-        return True, f"当前每行 {sorted(widths)[0]} 碱基，建议统一为 {width}"
-    return False, ""
+    return True, f"当前每行 {sorted(widths)[0]} 碱基，统一为 {width} 更稳妥"
 
 
 # --- .fai <-> WGDI .len -----------------------------------------------------

@@ -57,8 +57,12 @@ class Pipeline:
         """Problems that stop this step; empty when it can run."""
         if key in self.LOCAL_STEPS:
             return []
-        if key == "blast" and self.project.blast_input.source == "upload":
-            return []
+        if key == "blast":
+            if self.project.blast_input.source == "upload":
+                return []
+            wanted = ("diamond",) if self.project.engine == "diamond" \
+                else ("blastp", "makeblastdb")
+            return [f"缺少 {name}" for name in wanted if name not in self.runtime.bins]
         problems = list(self.runtime.problems)
         if key == "ks" and not self.runtime.has_ks:
             problems.append("Ks 需要 perl + pal2nal.pl + yn00.exe")
@@ -74,10 +78,6 @@ class Pipeline:
         """Run exactly one step; used by the wizard."""
         if reset_downstream:
             self.project.reset_from(key)
-        if key == "blast" and self.project.blast_input.source == "upload":
-            # nothing to build when the table is supplied
-            self.project.set_step("blastdb", "skipped", reason="使用上传的比对结果")
-            self.listener.step("blastdb", "skipped")
         results = self.run(only=[key])
         return results[0] if results else StepResult(key, False, message="未执行")
 
@@ -148,7 +148,6 @@ class Pipeline:
         stem = p.stem
         mapping = {
             "prep": [p.prepared / f"{p.genome_a.prefix}.gff"],
-            "blastdb": [p.work / f"{p.genome_a.prefix}.wgdi.pep.fasta.pdb"],
             "blast": [p.work / f"{stem}.blastp.txt"],
             "dotplot": [p.work / f"{stem}.dot.1.png"],
             "collinearity": [p.work / f"{stem}.collinearity.txt"],
@@ -302,19 +301,27 @@ class Pipeline:
         }
         self.project.set_detail("prep", detail)
 
-    def _step_blastdb(self) -> None:
-        if self.project.blast_input.source == "upload":
-            raise SkipStep("使用上传的比对结果，不需要建库")
-        assert self.runtime.bins.get("makeblastdb")
+    def _build_index(self) -> Path:
+        """Create the searchable protein database; returns the -db argument."""
         p = self.project
         fasta = p.prepared / f"{p.genome_a.prefix}.wgdi.pep.fasta"
+        if p.engine == "diamond":
+            prefix = p.work / f"{p.genome_a.prefix}.pep"
+            code = self._run("blast", [self.runtime.bins["diamond"], "makedb",
+                                       "--in", fasta, "-d", prefix,
+                                       "--threads", str(p.threads)])
+            if code != 0:
+                raise WgdiError(f"diamond makedb 退出码 {code}")
+            self.listener.log(f"已建 diamond 库：{prefix.name}.dmnd")
+            return prefix
         # BLAST 2.17 默认写 v5（LMDB）库，路径里有中文时 LMDB 会直接失败；
         # v4 的 .phr/.pin/.psq 是普通文件，中文路径下可用。
-        code = self._run("blastdb", [self.runtime.bins["makeblastdb"],
+        code = self._run("blast", [self.runtime.bins["makeblastdb"],
                                      "-in", fasta, "-dbtype", "prot",
                                      "-blastdb_version", "4"])
         if code != 0:
             raise WgdiError(f"makeblastdb 退出码 {code}")
+        return fasta
 
     def _import_blast(self) -> Path:
         """Validate an uploaded m8 table and copy it into the project."""
@@ -370,10 +377,20 @@ class Pipeline:
         query_source = (p.genome_a if (p.self_compare or p.genome_b is None)
                         else p.genome_b)
         query = p.prepared / f"{query_source.prefix}.wgdi.pep.fasta"
-        db = p.prepared / f"{p.genome_a.prefix}.wgdi.pep.fasta"
         out = p.work / f"{stem}.blastp.txt"
         chunks_dir = p.work / "chunks"
         chunks_dir.mkdir(parents=True, exist_ok=True)
+
+        previous = self.project.step_detail("blast").get("engine")
+        if previous and previous != p.engine:
+            self.listener.log(f"比对引擎换成 {p.engine}，清掉旧的分块结果")
+            shutil.rmtree(chunks_dir, ignore_errors=True)
+            chunks_dir.mkdir(parents=True, exist_ok=True)
+            out.unlink(missing_ok=True)
+        self.project.set_detail("blast", {"engine": p.engine})
+
+        db = self._build_index()
+        self.listener.log(f"比对引擎 {p.engine}，线程 {p.threads}")
         chunks = self._split_fasta(query, chunks_dir, stem)
         self.listener.log(f"比对分 {len(chunks)} 块，线程 {p.threads}")
         results: list[Path] = []
@@ -386,16 +403,16 @@ class Pipeline:
                 results.append(chunk_out)
                 self._report_blast(index, len(chunks), started)
                 continue
-            cmd = [self.runtime.bins["diamond"] if p.engine == "diamond"
-                   else self.runtime.bins["blastp"]]
             if p.engine == "diamond":
-                cmd += ["blastp", "-d", str(db), "-q", str(chunk)]
+                # diamond 只认短选项：-o / -f / -e / -p，且库必须是它自己建的 .dmnd
+                cmd = [self.runtime.bins["diamond"], "blastp",
+                       "-d", str(db), "-q", str(chunk), "-o", str(chunk_out),
+                       "-f", "6", "-e", p.params.evalue, "-p", str(p.threads)]
             else:
-                cmd += ["-db", str(db), "-query", str(chunk)]
-            cmd += ["-out", str(chunk_out), "-outfmt", "6",
-                    "-evalue", p.params.evalue, "-num_threads", str(p.threads)]
-            if p.engine != "diamond":
-                cmd += ["-num_alignments", "20"]
+                cmd = [self.runtime.bins["blastp"], "-db", str(db),
+                       "-query", str(chunk), "-out", str(chunk_out),
+                       "-outfmt", "6", "-evalue", p.params.evalue,
+                       "-num_threads", str(p.threads), "-num_alignments", "20"]
             code = self._run("blast", cmd)
             if code != 0:
                 raise WgdiError(f"比对退出码 {code}（第 {index}/{len(chunks)} 块）")

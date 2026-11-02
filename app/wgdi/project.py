@@ -22,8 +22,7 @@ from .conf import WgdiParams
 SCHEMA = 2
 STEPS = (
     ("prep", "预处理"),
-    ("blastdb", "建库"),
-    ("blast", "序列比对"),
+    ("blast", "建库与比对"),
     ("dotplot", "点阵图"),
     ("collinearity", "共线性"),
     ("ks", "Ks 计算"),

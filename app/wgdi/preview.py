@@ -204,9 +204,16 @@ def build(project: Project, key: str) -> Preview:
             stats.append((f"保留序列（{tag}）", f"{info.get('sequences', 0):,}"))
             dropped_total += len(info.get("dropped", []))
         stats.append(("排除序列", f"{dropped_total:,}"))
-        rows = _read_len(prepared / f"{project.genome_a.prefix}.len")
-        preview = Preview(kind="table", title="染色体", stats=stats,
-                          headers=["染色体", "长度", "基因数"], rows=rows[:MAX_ROWS])
+        rows: list[list[str]] = []
+        for side in ("A", "B") if not project.self_compare else ("A",):
+            genome = project.genome_a if side == "A" else project.genome_b
+            if genome is None:
+                continue
+            for item in _read_len(prepared / f"{genome.prefix}.len")[:10]:
+                rows.append([side, *item])
+        preview = Preview(kind="table", title="保留的序列", stats=stats,
+                          headers=["物种", "染色体", "长度", "基因数"],
+                          rows=rows[:MAX_ROWS])
         if detail.get(project.genome_a.prefix, {}).get("dropped"):
             preview.text = "已排除：" + "、".join(
                 detail[project.genome_a.prefix]["dropped"][:12])
@@ -215,23 +222,6 @@ def build(project: Project, key: str) -> Preview:
         elif project.step_detail("prep").get(project.genome_a.prefix, {}).get("sequences", 0) < 5:
             preview.warn = "保留的序列少于 5 条，可能是 scaffold 级组装，建议放宽过滤"
         return preview
-
-    if key == "blastdb":
-        prefix = project.genome_a.prefix
-        fasta = prepared / f"{prefix}.wgdi.pep.fasta"
-        db_files = sorted(work.glob(f"{prefix}.wgdi.pep.fasta.p*"))
-        if not db_files:
-            return Preview(hint="本步还没运行。" if
-                           project.blast_input.source != "upload" else
-                           "使用上传的比对结果，本步会自动跳过。")
-        total = sum(p.stat().st_size for p in db_files)
-        protein = _count_lines(fasta) if fasta.exists() else 0
-        return Preview(kind="stats", title="比对库",
-                       stats=[("蛋白序列", f"{protein:,}"),
-                              ("库文件", f"{len(db_files)} 个"),
-                              ("占用", f"{total / 1e6:,.1f} MB")],
-                       rows=[[p.name, f"{p.stat().st_size / 1e6:.1f} MB"] for p in db_files],
-                       headers=["文件", "大小"])
 
     if key == "blast":
         target = work / f"{stem}.blastp.txt"
@@ -250,10 +240,15 @@ def build(project: Project, key: str) -> Preview:
                 queries.add(parts[0])
                 if len(rows) < MAX_ROWS:
                     rows.append([parts[0], parts[1], parts[2], parts[10]])
-        source = "上传" if project.blast_input.source == "upload" else "本机比对"
-        return Preview(kind="table", title="比对结果",
-                       stats=[("来源", source), ("命中", f"{hits:,}"),
-                              ("查询序列", f"{len(queries):,}")],
+        source = "上传" if project.blast_input.source == "upload" else project.engine
+        db = sorted(project.work.glob("*.dmnd")) + sorted(
+            prepared.glob(f"{project.genome_a.prefix}.wgdi.pep.fasta.p*"))
+        db_size = sum(p.stat().st_size for p in db) / 1e6
+        stats = [("来源", source), ("命中", f"{hits:,}"),
+                 ("查询序列", f"{len(queries):,}")]
+        if db:
+            stats.append(("比对库", f"{db_size:,.0f} MB"))
+        return Preview(kind="table", title="比对结果", stats=stats,
                        headers=["query", "subject", "identity", "evalue"], rows=rows)
 
     if key == "dotplot":

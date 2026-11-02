@@ -37,6 +37,7 @@ class PreviewPane(QWidget):
 
         self.stats = QGridLayout()
         self.stats.setHorizontalSpacing(18)
+        self.stats.setColumnStretch(3, 1)
         self.stats.setVerticalSpacing(4)
         stats_holder = QWidget()
         stats_holder.setLayout(self.stats)
@@ -116,15 +117,14 @@ class PreviewPane(QWidget):
 
     def show_preview(self, preview: Preview) -> None:
         self._clear_stats()
-        row = 0
-        for label, value in preview.stats:
+        for index, (label, value) in enumerate(preview.stats):
+            row, col = divmod(index, 3)
             key = QLabel(label)
             key.setStyleSheet(f"font-size:10px;color:{self._t['ink3']};")
             val = QLabel(value)
             val.setStyleSheet(f"font-size:13px;color:{self._t['ink']};font-weight:600;")
-            self.stats.addWidget(key, 0, row)
-            self.stats.addWidget(val, 1, row)
-            row += 1
+            self.stats.addWidget(key, row * 2, col)
+            self.stats.addWidget(val, row * 2 + 1, col)
 
         if preview.warn:
             self.warn.setText("⚠ " + preview.warn)

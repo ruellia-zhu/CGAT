@@ -62,8 +62,7 @@ PARAM_FIELDS = {
 }
 DESCRIPTIONS = {
     "prep": "把基因组与注释转成 WGDI 需要的 gff / len / 蛋白 / CDS，默认只保留染色体。",
-    "blastdb": "用物种 A 的蛋白建 blast 库；上传比对结果时可跳过。",
-    "blast": "把两个物种的蛋白两两比对，产出 m8 表；也可以直接上传已有结果。",
+    "blast": "先建比对库再两两比对，产出 m8 表；已有结果也可以直接上传。",
     "dotplot": "用比对结果画共线性点阵图。",
     "collinearity": "在点阵基础上筛共线块，产出 collinearity 文件。",
     "ks": "对共线块里的基因对做 Ka/Ks（muscle + pal2nal + PAML）。",
