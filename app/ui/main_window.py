@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 
 from . import icons, theme
 from . import about as about_dialog
-from .analysis import AnalysisPanel, AnalysisStage, PipelineWorker
+from .analysis import PipelineWorker, PreviewStage, WizardPanel
 from .. import build_info as info
 from ..paths import data_root
 from ..core import palette as palette_mod
@@ -287,14 +287,15 @@ class MainWindow(QWidget):
         self.title_bar.add_switch(self.page_switch)
         root.addWidget(self.title_bar)
 
-        self.analysis_panel = AnalysisPanel()
-        self.analysis_stage = AnalysisStage()
-        self.analysis_panel.start_requested.connect(self._start_analysis)
+        self.analysis_panel = WizardPanel()
+        self.analysis_stage = PreviewStage()
+        self.analysis_panel.run_requested.connect(self._wizard_run)
+        self.analysis_panel.run_all_requested.connect(self._wizard_run_all)
         self.analysis_panel.notified.connect(self.analysis_stage.append)
+        self.analysis_panel.step_changed.connect(self._wizard_step_changed)
+        self.analysis_stage.cancel_requested.connect(self._cancel_analysis)
         self.analysis_stage.load_requested.connect(self._load_project)
         self.analysis_stage.results_requested.connect(self._show_results)
-        self.analysis_stage.cancel_requested.connect(self._cancel_analysis)
-        self.analysis_panel.cancel_btn.clicked.connect(self._cancel_analysis)
 
         self.panel_stack = QStackedWidget()
         self.panel_stack.setFixedWidth(360)
@@ -308,6 +309,7 @@ class MainWindow(QWidget):
         self.stage_stack.setFrameShape(QFrame.NoFrame)
         self.panel_stack.setCurrentIndex(1)
         self.stage_stack.setCurrentIndex(1)
+        self._wizard_step_changed(self.analysis_panel.current_key())
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -580,35 +582,68 @@ class MainWindow(QWidget):
         else:
             self._refresh_state()
 
-    def _start_analysis(self, project) -> None:
+    # -- wizard ----------------------------------------------------------
+    def _wizard_step_changed(self, key: str) -> None:
+        self.analysis_stage.set_project(self.analysis_panel.project())
+        self.analysis_stage.select(key)
+
+    def _wizard_run(self, key: str) -> None:
+        project = self.analysis_panel.ensure_project()
+        if project is None:
+            return
+        self._launch(project, [key])
+
+    def _wizard_run_all(self) -> None:
+        project = self.analysis_panel.ensure_project()
+        if project is None:
+            return
+        self._launch(project, None)
+
+    def _launch(self, project, keys: list[str] | None) -> None:
         from ..wgdi import runtime as runtime_mod
 
-        rt = runtime_mod.discover()
-        if not rt.ok:
-            for problem in rt.problems:
-                self.analysis_stage.append("✕ " + problem)
+        if getattr(self, "_analysis", None) is not None and self._analysis.isRunning():
+            self.analysis_stage.append("上一步还在运行，先取消或等它结束")
             return
-        if not rt.has_ks:
-            self.analysis_stage.append(
-                "未检测到 Ks 工具链（perl + pal2nal.pl + yn00.exe），Ks 步骤会跳过")
-
-        self._analysis = PipelineWorker(project, rt, self)
-        self._analysis.signals.log.connect(self.analysis_stage.append)
-        self._analysis.signals.step.connect(self.analysis_stage.set_step)
-        self._analysis.signals.progress.connect(self.analysis_stage.set_progress)
-        self._analysis.signals.done.connect(self._analysis_done)
-        self._analysis.signals.failed.connect(self._analysis_failed)
-        self.analysis_stage.begin(project)
+        rt = runtime_mod.discover()
+        needed = keys or [self.analysis_panel.current_key()]
+        for key in needed:
+            probe = PipelineWorker(project, rt, [key])
+            ok, reason = probe.pipeline.can_run(key) if probe.pipeline else (True, "")
+            if not ok:
+                self.analysis_stage.append(f"{key} 无法运行：{reason}")
+                if keys is None:
+                    return
+                continue
+        self.analysis_stage.set_project(project)
+        self.analysis_stage.set_running(True)
         self.analysis_panel.set_running(True)
-        self._analysis.start()
+
+        worker = PipelineWorker(project, rt, keys, self)
+        worker.signals.log.connect(self.analysis_stage.append)
+        worker.signals.progress.connect(self.analysis_stage.set_progress)
+        worker.signals.done.connect(self._analysis_done)
+        worker.signals.failed.connect(self._analysis_failed)
+        self._analysis = worker
+        worker.start()
 
     def _analysis_done(self, results: list) -> None:
-        self.analysis_stage.finish(results)
+        self.analysis_stage.set_running(False)
         self.analysis_panel.set_running(False)
+        for key, ok, skipped, message in results:
+            if skipped:
+                self.analysis_stage.append(f"跳过 {key}：{message}")
+            elif not ok:
+                self.analysis_stage.append(f"失败 {key}：{message}")
+        self.analysis_panel.refresh_states()
+        self.analysis_stage.refresh()
+        self.analysis_panel.select(self.analysis_panel.current_key())
 
     def _analysis_failed(self, message: str) -> None:
         self.analysis_stage.fail(message)
+        self.analysis_stage.set_running(False)
         self.analysis_panel.set_running(False)
+        self.analysis_panel.refresh_states()
 
     def _cancel_analysis(self) -> None:
         worker = getattr(self, "_analysis", None)
@@ -616,6 +651,7 @@ class MainWindow(QWidget):
             self.analysis_stage.append("正在取消…")
             worker.pipeline.cancel()
             worker.wait(5000)
+        self.analysis_stage.set_running(False)
         self.analysis_panel.set_running(False)
 
     def _load_project(self, root: str) -> None:

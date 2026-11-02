@@ -19,7 +19,7 @@ from pathlib import Path
 from ..core.issues import WgdiError
 from .conf import WgdiParams
 
-SCHEMA = 1
+SCHEMA = 2
 STEPS = (
     ("prep", "预处理"),
     ("blastdb", "建库"),
@@ -40,6 +40,39 @@ def default_threads() -> int:
 
     cpu = os.cpu_count() or 4
     return max(1, min(8, cpu))
+
+
+@dataclass
+class Filters:
+    """How sequences are kept when the WGDI inputs are built."""
+
+    chromosomes_only: bool = True
+    extra_exclude: str = ""
+    strip_prefix: str = ""
+
+    def exclude_pattern(self):
+        """Compiled regex of what to drop, or None to keep everything."""
+        import re
+
+        if not self.chromosomes_only and not self.extra_exclude.strip():
+            return None
+        from ..prep.build import DEFAULT_EXCLUDE
+
+        parts = []
+        if self.chromosomes_only:
+            parts.append(DEFAULT_EXCLUDE.pattern)
+        if self.extra_exclude.strip():
+            parts.append(self.extra_exclude.strip())
+        return re.compile("|".join(f"(?:{p})" for p in parts), re.I)
+
+
+@dataclass
+class BlastInput:
+    """Where the alignment table comes from."""
+
+    source: str = "run"          # "run" | "upload"
+    uploaded: str | None = None  # original path, kept for the log
+
 
 
 @dataclass
@@ -69,6 +102,8 @@ class Project:
     engine: str = "blastp"                 # "blastp" | "diamond"
     threads: int = field(default_factory=default_threads)
     params: WgdiParams = field(default_factory=WgdiParams)
+    filters: Filters = field(default_factory=Filters)
+    blast_input: BlastInput = field(default_factory=BlastInput)
     steps: dict[str, dict] = field(default_factory=dict)
     app_version: str = ""
     created: float = field(default_factory=time.time)
@@ -119,6 +154,19 @@ class Project:
     def is_done(self, key: str) -> bool:
         return self.step_state(key) == "done"
 
+    def step_detail(self, key: str) -> dict:
+        return dict(self.steps.get(key, {}).get("detail", {}))
+
+    def set_detail(self, key: str, detail: dict) -> None:
+        self.steps.setdefault(key, {})["detail"] = detail
+
+    def downstream_dirty(self, key: str) -> list[str]:
+        """Steps after `key` that already have a result and would go stale."""
+        keys = [k for k, _ in STEPS]
+        if key not in keys:
+            return []
+        return [k for k in keys[keys.index(key) + 1:] if self.step_state(k) != "pending"]
+
     # --- persistence ----------------------------------------------------
     def to_dict(self) -> dict:
         return {
@@ -130,6 +178,8 @@ class Project:
             "engine": self.engine,
             "threads": self.threads,
             "params": self.params.to_dict(),
+            "filters": asdict(self.filters),
+            "blast_input": asdict(self.blast_input),
             "genome_a": asdict(self.genome_a),
             "genome_b": asdict(self.genome_b) if self.genome_b else None,
             "steps": self.steps,
@@ -158,6 +208,8 @@ class Project:
             engine=data.get("engine", "blastp"),
             threads=int(data.get("threads", default_threads())),
             params=WgdiParams.from_dict(data.get("params", {})),
+            filters=Filters(**(data.get("filters") or {})),
+            blast_input=BlastInput(**(data.get("blast_input") or {})),
             steps=data.get("steps", {}),
             app_version=data.get("app_version", ""),
             created=float(data.get("created", time.time())),

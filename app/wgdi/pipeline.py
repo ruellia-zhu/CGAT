@@ -51,8 +51,40 @@ class Pipeline:
         self._current = ""
 
     # --- public ---------------------------------------------------------
+    LOCAL_STEPS = ("prep", "circos")
+
+    def needs_runtime(self, key: str) -> list[str]:
+        """Problems that stop this step; empty when it can run."""
+        if key in self.LOCAL_STEPS:
+            return []
+        if key == "blast" and self.project.blast_input.source == "upload":
+            return []
+        problems = list(self.runtime.problems)
+        if key == "ks" and not self.runtime.has_ks:
+            problems.append("Ks 需要 perl + pal2nal.pl + yn00.exe")
+        return problems
+
+    def can_run(self, key: str) -> tuple[bool, str]:
+        problems = self.needs_runtime(key)
+        if problems:
+            return False, "；".join(problems)
+        return True, ""
+
+    def run_step(self, key: str, *, reset_downstream: bool = True) -> StepResult:
+        """Run exactly one step; used by the wizard."""
+        if reset_downstream:
+            self.project.reset_from(key)
+        if key == "blast" and self.project.blast_input.source == "upload":
+            # nothing to build when the table is supplied
+            self.project.set_step("blastdb", "skipped", reason="使用上传的比对结果")
+            self.listener.step("blastdb", "skipped")
+        results = self.run(only=[key])
+        return results[0] if results else StepResult(key, False, message="未执行")
+
     def run(self, only: list[str] | None = None, from_step: str | None = None) -> list[StepResult]:
-        if not self.runtime.ok:
+        if only and len(only) == 1 and not self.needs_runtime(only[0]):
+            pass
+        elif not self.runtime.ok:
             raise WgdiError("WGDI 运行时不完整：" + "；".join(self.runtime.problems))
         keys = [k for k, _ in STEPS]
         if from_step and from_step in keys:
@@ -234,18 +266,22 @@ class Pipeline:
         def progress(stage: str, done: int, total: int) -> None:
             self.listener.progress("prep", done, total, None)
 
+        filters = self.project.filters
+        exclude = filters.exclude_pattern()
         if genome.mode == "manual":
             if not genome.fai or not genome.gff or not genome.pep:
                 raise WgdiError(f"物种 {prefix} 缺少 fai / gff / 蛋白文件")
             prepared = prep.prepare_manual(
                 Path(genome.fai), Path(genome.gff), Path(genome.pep),
                 Path(genome.cds) if genome.cds else None,
-                out_dir, prefix, progress=progress, log=log)
+                out_dir, prefix, exclude=exclude, strip_prefix=filters.strip_prefix,
+                progress=progress, log=log)
         else:
             if not genome.genome or not genome.gff:
                 raise WgdiError(f"物种 {prefix} 缺少基因组 FASTA 或注释")
             prepared = prep.prepare_auto(
                 Path(genome.genome), Path(genome.gff), out_dir, prefix,
+                exclude=exclude, strip_prefix=filters.strip_prefix,
                 progress=progress, log=log)
             genome.fai = str(prepared.fai)
         for issue in prepared.issues:
@@ -253,8 +289,22 @@ class Pipeline:
                 raise WgdiError(str(issue))
             log(f"  {issue}")
         log(f"  {prefix}: {prepared.summary()}")
+        if prepared.dropped:
+            sample = "、".join(prepared.dropped[:5])
+            more = f" 等 {len(prepared.dropped)} 条" if len(prepared.dropped) > 5 else ""
+            log(f"  已排除非染色体序列：{sample}{more}")
+        detail = self.project.step_detail("prep")
+        detail[prefix] = {
+            "genes": prepared.genes,
+            "sequences": prepared.sequences,
+            "kept": prepared.kept_names,
+            "dropped": prepared.dropped,
+        }
+        self.project.set_detail("prep", detail)
 
     def _step_blastdb(self) -> None:
+        if self.project.blast_input.source == "upload":
+            raise SkipStep("使用上传的比对结果，不需要建库")
         assert self.runtime.bins.get("makeblastdb")
         p = self.project
         fasta = p.prepared / f"{p.genome_a.prefix}.wgdi.pep.fasta"
@@ -263,9 +313,57 @@ class Pipeline:
         if code != 0:
             raise WgdiError(f"makeblastdb 退出码 {code}")
 
+    def _import_blast(self) -> Path:
+        """Validate an uploaded m8 table and copy it into the project."""
+        p = self.project
+        source = p.blast_input.uploaded
+        if not source:
+            raise WgdiError("还没有选择要比对的文件")
+        src = Path(source)
+        if not src.exists():
+            raise WgdiError(f"找不到文件：{src}")
+        if src.stat().st_size == 0:
+            raise WgdiError(f"{src.name} 是空文件")
+
+        rows = 0
+        queries: set[str] = set()
+        with src.open("r", encoding="utf-8", errors="replace") as handle:
+            for number, line in enumerate(handle, 1):
+                if not line.strip() or line.startswith("#"):
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 6:
+                    parts = line.split()
+                if len(parts) < 6:
+                    raise WgdiError(
+                        f"{src.name} 第 {number} 行只有 {len(parts)} 列，"
+                        "应为 outfmt 6 的 12 列（至少 6 列）")
+                try:
+                    float(parts[10]) if len(parts) > 10 else float(parts[2])
+                except ValueError as exc:
+                    raise WgdiError(
+                        f"{src.name} 第 {number} 行的数值列无法解析：{parts[:3]}") from exc
+                queries.add(parts[0])
+                rows += 1
+                if rows <= 2000:
+                    continue
+        if rows == 0:
+            raise WgdiError(f"{src.name} 里没有比对记录")
+
+        self.listener.log(f"导入比对结果：{rows:,} 行，{len(queries):,} 条查询序列")
+        target = p.work / f"{p.stem}.blastp.txt"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, target)
+        return target
+
     def _step_blast(self) -> None:
         p = self.project
         stem = p.stem
+        if p.blast_input.source == "upload":
+            target = self._import_blast()
+            self.listener.log(f"已使用上传的比对结果：{target.name}")
+            self.project.set_detail("blast", {"source": "upload", "file": str(target)})
+            return
         query_source = (p.genome_a if (p.self_compare or p.genome_b is None)
                         else p.genome_b)
         query = p.prepared / f"{query_source.prefix}.wgdi.pep.fasta"

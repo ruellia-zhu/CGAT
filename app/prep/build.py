@@ -44,6 +44,8 @@ class PreparedGenome:
     genome_fa: Path | None
     genes: int = 0
     sequences: int = 0
+    kept_names: list[str] = field(default_factory=list)
+    dropped: list[str] = field(default_factory=list)
     issues: list[Issue] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -55,17 +57,27 @@ def _report(progress: Progress, stage: str, done: int, total: int) -> None:
         progress(stage, done, total)
 
 
-def _filter_records(records: list[FaiRecord], exclude: re.Pattern | None,
-                    keep: re.Pattern | None, alias: Callable[[str], str]) -> list[FaiRecord]:
+def _split_records(records: list[FaiRecord], exclude: re.Pattern | None,
+                   keep: re.Pattern | None,
+                   alias: Callable[[str], str]) -> tuple[list[FaiRecord], list[str]]:
+    """Keep the records the filters like; report the names that were dropped."""
     out: list[FaiRecord] = []
+    dropped: list[str] = []
     for rec in records:
         name = alias(rec.name)
         if keep is not None and not keep.search(name):
+            dropped.append(name)
             continue
         if exclude is not None and exclude.search(name):
+            dropped.append(name)
             continue
         out.append(FaiRecord(name, rec.length, rec.offset, rec.linebases, rec.linewidth))
-    return out
+    return out, dropped
+
+
+def _filter_records(records: list[FaiRecord], exclude: re.Pattern | None,
+                    keep: re.Pattern | None, alias: Callable[[str], str]) -> list[FaiRecord]:
+    return _split_records(records, exclude, keep, alias)[0]
 
 
 def write_gff(choices: list[gff3_mod.GeneChoice], path: Path, alias: Callable[[str], str]) -> int:
@@ -142,7 +154,7 @@ def prepare_auto(
         genome_fa = target
         issues.append(Issue("info", Path(genome_fa).name, f"已重排为 {width} 列：{why}"))
 
-    records = _filter_records(records, exclude, keep, alias)
+    records, dropped = _split_records(records, exclude, keep, alias)
     if not records:
         raise WgdiError("过滤后没有剩下任何序列，检查排除规则 / 染色体命名")
     fai_path = fai_mod.write_fai(out_dir / f"{prefix}.fai", records)
@@ -199,14 +211,17 @@ def prepare_auto(
     _write_fasta(pep_path, pep_items)
     speak(f"完成：{len(pep_items):,} 个基因，{sequences} 条染色体")
 
-    return PreparedGenome(prefix, gff_path, out_dir / f"{prefix}.len", pep_path, cds_path,
-                          fai_path, Path(genome_fa), len(pep_items), sequences, issues)
+    result = PreparedGenome(prefix, gff_path, out_dir / f"{prefix}.len", pep_path, cds_path,
+                            fai_path, Path(genome_fa), len(pep_items), sequences, issues=issues)
+    result.kept_names = [r.name for r in records]
+    result.dropped = dropped
+    return result
 
 
 def prepare_manual(
     fai_path: Path, annotation: Path, pep_path: Path, cds_path: Path | None,
     out_dir: Path, prefix: str, *, strip_prefix: str = "",
-    exclude: re.Pattern | None = DEFAULT_EXCLUDE,
+    exclude: re.Pattern | None = DEFAULT_EXCLUDE, keep: re.Pattern | None = None,
     progress: Progress = None, log: Callable[[str], None] | None = None,
 ) -> PreparedGenome:
     """User-supplied .fai + longest-transcript CDS/protein + annotation."""
@@ -222,7 +237,9 @@ def prepare_manual(
     bad = [i for i in fai_issues if i.level == "error"]
     if bad:
         raise WgdiError(str(bad[0]))
-    records = _filter_records(records, exclude, None, alias)
+    records, dropped = _split_records(records, exclude, keep, alias)
+    if not records:
+        raise WgdiError("过滤后没有剩下任何序列，检查排除规则 / 染色体命名")
 
     speak("读取注释…")
     transcripts, ann_issues = gff3_mod.read_annotation(annotation)
@@ -296,9 +313,12 @@ def prepare_manual(
             issues.append(Issue("warning", Path(cds_path).name,
                                 "蛋白与 CDS 的 ID 集合不一致，Ks 计算可能受影响"))
     speak(f"完成：{len(choices):,} 个基因，{sequences} 条染色体")
-    return PreparedGenome(prefix, gff_path, out_dir / f"{prefix}.len",
-                          pep_out, cds_out, out_fai, None,
-                          len(choices), sequences, issues)
+    result = PreparedGenome(prefix, gff_path, out_dir / f"{prefix}.len",
+                            pep_out, cds_out, out_fai, None,
+                            len(choices), sequences, issues=issues)
+    result.kept_names = [r.name for r in records]
+    result.dropped = dropped
+    return result
 
 
 def _read_lengths(path: Path) -> tuple[list[FaiRecord], list[Issue]]:
