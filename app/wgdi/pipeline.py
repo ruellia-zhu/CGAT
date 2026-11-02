@@ -202,12 +202,16 @@ class Pipeline:
                     or ((p.prepared / f"{p.genome_a.prefix}.wgdi.cds.fasta").exists()
                         and self.runtime.has_ks))
         with_ks = ks_ready
+        # wgdi joins muscle/pal2nal into a shell string, so those paths must be
+        # quoted; Biopython execs yn00 directly, so that one must stay bare.
         muscle = self.runtime.bins.get("muscle")
-        # wgdi joins the command into a string and runs it through the shell, so
-        # the path must be quoted or a space anywhere in it breaks the call.
-        muscle_path = f'"{muscle}"' if muscle is not None else None
-        text = conf_mod.render(a, b, stem, name_a, name_b, p.params,
-                               with_ks=with_ks, muscle_path=muscle_path)
+        pal2nal = self.runtime.bins.get("pal2nal")
+        yn00 = self.runtime.bins.get("yn00")
+        text = conf_mod.render(
+            a, b, stem, name_a, name_b, p.params, with_ks=with_ks,
+            muscle_path=f'"{muscle}"' if muscle else None,
+            pal2nal_path=f'"{pal2nal}"' if pal2nal else None,
+            yn00_path=str(yn00) if yn00 else None)
         return conf_mod.write(p.work / "total.conf", text)
 
     # --- individual steps ------------------------------------------------

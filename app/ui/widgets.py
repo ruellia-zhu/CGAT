@@ -113,11 +113,13 @@ class SegmentedControl(QWidget):
     def current(self) -> int:
         return self._group.checkedId()
 
-    def set_current(self, idx: int) -> None:
-        if 0 <= idx < len(self._buttons):
+    def set_current(self, idx: int, emit: bool = False) -> None:
+        if 0 <= idx < len(self._buttons) and idx != self.current():
             self._buttons[idx].setChecked(True)
             self._indicator = self._rect_for(idx)
             self.update()
+            if emit:
+                self.changed.emit(idx)
 
     def _rect_for(self, idx: int) -> QRectF:
         b = self._buttons[idx]

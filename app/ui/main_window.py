@@ -424,6 +424,17 @@ class MainWindow(QWidget):
         fl.setContentsMargins(16, 12, 16, 12)
         fl.setSpacing(8)
 
+        self.btn_analysis = QPushButton("全流程分析")
+        self.btn_analysis.setObjectName("ghost")
+        self.btn_analysis.setCursor(Qt.PointingHandCursor)
+        self.btn_analysis.setIcon(icons.icon("circle-dot", t["ink2"], 15))
+        self.btn_analysis.setIconSize(QSize(15, 15))
+        self.btn_analysis.setMinimumHeight(38)
+        self.btn_analysis.setToolTip(
+            "上传基因组与注释，自动完成 blastp、共线性、Ks、块汇总，并直接出 Circos")
+        self.btn_analysis.clicked.connect(self._on_open_analysis)
+        fl.addWidget(self.btn_analysis, 1)
+
         self.btn_generate = QPushButton("生成图片")
         self.btn_generate.setObjectName("primary")
         self.btn_generate.setToolTip("按当前数据与样式出图；改样式后会自动刷新预览")
@@ -532,6 +543,40 @@ class MainWindow(QWidget):
         return wrap
 
     # -- demo data -------------------------------------------------------
+    def _on_open_analysis(self) -> None:
+        from .analysis import AnalysisDialog
+
+        dialog = AnalysisDialog(self, self._mode)
+        dialog.load_requested.connect(self._load_project)
+        dialog.exec()
+
+    def _load_project(self, root: str) -> None:
+        """Point the plotting slots at a finished project's results."""
+        from PySide6.QtWidgets import QMessageBox
+
+        from ..wgdi.project import Project
+
+        try:
+            project = Project.load(Path(root))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "无法载入项目", str(exc))
+            return
+        self._self_cmp.setChecked(project.self_compare)
+        pairs = [
+            ("a_gff", project.prepared / f"{project.genome_a.prefix}.gff"),
+            ("a_len", project.prepared / f"{project.genome_a.prefix}.len"),
+            ("blocks", project.work / f"{project.stem}_block_information.csv"),
+        ]
+        if not project.self_compare and project.genome_b is not None:
+            pairs += [
+                ("b_gff", project.prepared / f"{project.genome_b.prefix}.gff"),
+                ("b_len", project.prepared / f"{project.genome_b.prefix}.len"),
+            ]
+        for key, path in pairs:
+            self._slots[key].set_path(path if path.exists() else None)
+        self._refresh_state()
+        self._on_generate()
+
     def _load_demo(self) -> None:
         """Open the real dataset 01 so the first screen shows real numbers."""
         demo = {

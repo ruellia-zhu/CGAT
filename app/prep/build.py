@@ -187,6 +187,12 @@ def prepare_auto(
         counts[key] = counts.get(key, 0) + 1
     write_gff(choices, gff_path, alias)
     sequences = write_len(records, counts, out_dir / f"{prefix}.len")
+    if sequences == 0:
+        wanted = "、".join(sorted(counts)[:3])
+        have = "、".join(sorted(r.name for r in records)[:3])
+        raise WgdiError(
+            f"长度文件与注释的染色体名对不上：注释里有 {wanted}，长度文件里是 {have}。"
+            "请用与注释同一版本的 .fai。")
     cds_path = out_dir / f"{prefix}.wgdi.cds.fasta"
     pep_path = out_dir / f"{prefix}.wgdi.pep.fasta"
     _write_fasta(cds_path, cds_items)
@@ -210,8 +216,8 @@ def prepare_manual(
     issues: list[Issue] = []
     speak = log or (lambda _msg: None)
 
-    speak("读取 .fai…")
-    records, fai_issues = fai_mod.parse_fai(fai_path)
+    speak("读取长度文件…")
+    records, fai_issues = _read_lengths(fai_path)
     issues += fai_issues
     bad = [i for i in fai_issues if i.level == "error"]
     if bad:
@@ -266,7 +272,17 @@ def prepare_manual(
         counts[key] = counts.get(key, 0) + 1
     write_gff(choices, gff_path, alias)
     sequences = write_len(records, counts, out_dir / f"{prefix}.len")
-    out_fai = fai_mod.write_fai(out_dir / f"{prefix}.fai", records)
+    if sequences == 0:
+        wanted = "、".join(sorted(counts)[:3])
+        have = "、".join(sorted(r.name for r in records)[:3])
+        raise WgdiError(
+            f"长度文件与注释的染色体名对不上：注释里有 {wanted}，长度文件里是 {have}。"
+            "请用与注释同一版本的 .fai。")
+    if records and all(r.linebases > 0 for r in records):
+        out_fai = fai_mod.write_fai(out_dir / f"{prefix}.fai", records)
+    else:
+        # a WGDI .len has no byte offsets; do not invent one
+        out_fai = Path(fai_path)
 
     # Normalise the FASTA headers to gene IDs; WGDI's -ks matches them against
     # column 2 of the gff, so transcript-style headers would silently break Ks.
@@ -283,6 +299,42 @@ def prepare_manual(
     return PreparedGenome(prefix, gff_path, out_dir / f"{prefix}.len",
                           pep_out, cds_out, out_fai, None,
                           len(choices), sequences, issues)
+
+
+def _read_lengths(path: Path) -> tuple[list[FaiRecord], list[Issue]]:
+    """Accept a 5-column .fai or a WGDI .len (2-3 columns)."""
+    path = Path(path)
+    if not path.exists():
+        raise WgdiError(f"找不到文件：{path}")
+    head = ""
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if line.strip() and not line.startswith("#"):
+                head = line
+                break
+    if len(head.split()) >= 5:
+        return fai_mod.parse_fai(path)
+
+    records: list[FaiRecord] = []
+    issues: list[Issue] = []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for number, line in enumerate(handle, 1):
+            parts = line.split()
+            if not parts or line.startswith("#"):
+                continue
+            if len(parts) < 2:
+                issues.append(Issue("error", f"{path.name}:{number}", "应有 2 或 3 列：名称 长度"))
+                continue
+            try:
+                length = int(parts[1])
+            except ValueError:
+                issues.append(Issue("error", f"{path.name}:{number}", "长度不是整数"))
+                continue
+            records.append(FaiRecord(parts[0], length, 0, 0, 0))
+    if records:
+        issues.append(Issue("info", path.name,
+                            f"按 WGDI .len 读取（{len(records)} 条，无字节偏移）"))
+    return records, issues
 
 
 def _rewrite_fasta(src: Path, dst: Path, id_map: dict[str, str],

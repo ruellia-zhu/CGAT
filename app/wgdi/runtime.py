@@ -127,22 +127,30 @@ def discover(override: str | None = None) -> Runtime:
     for key in REQUIRED:
         if key not in rt.bins:
             rt.problems.append(f"缺少 {BINARIES[key]}（{key}）")
-    # Ks toolchain is optional; look on PATH and in bin/
-    for key, filename in (("perl", "perl.exe"), ("yn00", "yn00.exe")):
-        for base in (root / "bin", Path(__file__).resolve().parents[2] / "bin"):
-            exe = base / filename
-            if exe.exists():
-                rt.bins.setdefault(key, exe)
-                break
-        else:
-            found = shutil.which(key)
-            if found:
-                rt.bins.setdefault(key, Path(found))
+    # Ks toolchain is optional. Portable Perl lives in its own subtree, so try
+    # that first, then a flat bin/perl.exe, then whatever is on PATH.
     for base in (root / "bin", Path(__file__).resolve().parents[2] / "bin"):
+        for rel in ("perl/bin/perl.exe", "perl.exe"):
+            exe = base / rel
+            if exe.exists():
+                rt.bins.setdefault("perl", exe)
+                break
+        for rel in ("yn00.exe", "yn00"):
+            exe = base / rel
+            if exe.exists():
+                rt.bins.setdefault("yn00", exe)
+                break
         script = base / "pal2nal.pl"
         if script.exists():
             rt.bins.setdefault("pal2nal", script)
-            break
+        if "perl" not in rt.bins:
+            found = shutil.which("perl")
+            if found:
+                rt.bins["perl"] = Path(found)
+        if "yn00" not in rt.bins:
+            found = shutil.which("yn00")
+            if found:
+                rt.bins["yn00"] = Path(found)
     return rt
 
 

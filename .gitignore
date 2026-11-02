@@ -11,6 +11,11 @@ venv/
 env/
 *.egg-info/
 
+# ---- 运行时与外部工具（本地安装，按需重建）----
+runtime/
+bin/
+build/downloads/
+
 # ---- 构建产物 ----
 build/work/
 dist/
@@ -21,6 +26,9 @@ dist/
 app/resources/preview_live.png
 app/resources/draft.png
 *.log
+
+# ---- 开发资料：设计文档、早期试绘脚本，只留本地 ----
+dev-docs/
 
 # ---- 测试与验证脚本：保留在本地，不进仓库 ----
 #（这些脚本依赖本机的 共线性分析 数据集，别人拿走也跑不起来）
@@ -55,7 +63,4 @@ tools/smoke_ui.py
 Thumbs.db
 desktop.ini
 .DS_Store
-runtime/
-bin/
-# 下载缓存与构建输入，不入库
-build/downloads/
+build/dl/

@@ -78,7 +78,8 @@ def _b(value: bool) -> str:
 def render(files1: GenomeFiles, files2: GenomeFiles, stem: str,
            name1: str, name2: str, params: WgdiParams, *,
            with_ks: bool = True, blast_file: str | None = None,
-           muscle_path: str | None = None) -> str:
+           muscle_path: str | None = None, pal2nal_path: str | None = None,
+           yn00_path: str | None = None) -> str:
     """Return the text of total.conf.
 
     `stem` prefixes every output file, e.g. ``Sjap-Mtrun``.
@@ -137,7 +138,13 @@ savefile = {collinearity}
     if with_ks and files1.pep and files2.pep and files1.cds and files2.cds:
         pep = files1.pep if files1.pep == files2.pep else f"{files1.pep};{files2.pep}"
         cds = files1.cds if files1.cds == files2.cds else f"{files1.cds};{files2.cds}"
-        tool = f"muscle_path = {muscle_path}\n" if muscle_path else ""
+        tool = ""
+        if muscle_path:
+            tool += f"muscle_path = {muscle_path}\n"
+        if pal2nal_path:
+            tool += f"pal2nal_path = {pal2nal_path}\n"
+        if yn00_path:
+            tool += f"yn00_path = {yn00_path}\n"
         parts.append(f"""[ks]
 cds_file = {cds}
 pep_file = {pep}
@@ -210,7 +217,8 @@ def write(path: Path, text: str) -> Path:
 
 def for_self(files: GenomeFiles, stem: str, name: str, params: WgdiParams,
              with_ks: bool = True, blast_file: str | None = None,
-             muscle_path: str | None = None) -> str:
+             muscle_path: str | None = None, pal2nal_path: str | None = None,
+           yn00_path: str | None = None) -> str:
     """Self comparison: both sides point at the same files."""
     return render(files, files, stem, name, name, params,
                   with_ks=with_ks, blast_file=blast_file, muscle_path=muscle_path)
