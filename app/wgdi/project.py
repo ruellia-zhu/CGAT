@@ -19,7 +19,7 @@ from pathlib import Path
 from ..core.issues import WgdiError
 from .conf import WgdiParams
 
-SCHEMA = 2
+SCHEMA = 3
 STEPS = (
     ("prep", "预处理"),
     ("blast", "建库与比对"),
@@ -103,6 +103,7 @@ class Project:
     params: WgdiParams = field(default_factory=WgdiParams)
     filters: Filters = field(default_factory=Filters)
     blast_input: BlastInput = field(default_factory=BlastInput)
+    formats: list[str] = field(default_factory=lambda: ["pdf", "svg", "png"])
     steps: dict[str, dict] = field(default_factory=dict)
     app_version: str = ""
     created: float = field(default_factory=time.time)
@@ -142,13 +143,116 @@ class Project:
         entry = self.steps.setdefault(key, {})
         entry.update(extra)
         entry["state"] = state
+        if state == "done":
+            entry.pop("invalidated", None)
+            entry.pop("error", None)
         entry["updated"] = time.time()
 
     def reset_from(self, key: str) -> None:
         keys = [k for k, _ in STEPS]
         if key in keys:
             for k in keys[keys.index(key):]:
-                self.steps.pop(k, None)
+                self.steps[k] = {"state": "pending", "invalidated": True}
+
+    def validate(self) -> None:
+        import math
+        for genome in self.genomes:
+            if not re.fullmatch(r"[\w.-]+", genome.prefix) or genome.prefix in (".", ".."):
+                raise WgdiError("物种文件前缀只能包含字母、数字、下划线、点或短横线")
+        if len(self.genomes) == 2 and self.genomes[0].prefix.casefold() == self.genomes[1].prefix.casefold():
+            raise WgdiError("两个物种的文件前缀相同，请分别使用不同前缀，避免覆盖预处理文件")
+        if not self.self_compare and self.genome_b is None:
+            raise WgdiError("跨物种分析需要物种 B")
+        if not 1 <= self.threads <= 8 or not 1 <= int(self.params.process) <= 8:
+            raise WgdiError("本机比对线程和 WGDI process 必须在 1–8 之间")
+        if not math.isfinite(float(self.params.evalue)) or float(self.params.evalue) <= 0:
+            raise WgdiError("evalue 必须是大于 0 的有限数值")
+        if not self.formats or set(self.formats) - {"pdf", "png", "svg"}:
+            raise WgdiError("至少选择一种输出格式：PDF、SVG 或 PNG")
+        self.filters.exclude_pattern()
+
+    @property
+    def genomes(self) -> list[GenomeInput]:
+        return [self.genome_a] if self.self_compare or self.genome_b is None else [self.genome_a, self.genome_b]
+
+    def outputs(self, key: str) -> list[Path]:
+        if key == "prep":
+            files = []
+            for genome in self.genomes:
+                suffixes = ["gff", "len", "wgdi.pep.fasta"]
+                if genome.mode == "auto":
+                    suffixes += ["fai", "wgdi.cds.fasta"]
+                elif genome.cds:
+                    suffixes += ["wgdi.cds.fasta"]
+                files += [self.prepared / f"{genome.prefix}.{s}" for s in suffixes]
+            return files
+        if key == "circos":
+            return [self.results / f"{self.stem}.{fmt}" for fmt in self.formats]
+        suffixes = {"blast": "blastp.txt", "dotplot": "dot.1.png", "collinearity": "collinearity.txt",
+                    "ks": "ks", "blockks": "ks.dotplot.png", "kspeaks": "ks_median_distribution.png"}
+        if key == "blockinfo":
+            return [self.work / f"{self.stem}_block_information.csv"]
+        return [self.work / f"{self.stem}.{suffixes[key]}"] if key in suffixes else []
+
+    def input_signature(self, key: str) -> str:
+        from .cache import file_stamp, fingerprint
+        params = self.params.to_dict()
+        payload = {"logic": 3, "step": key, "self": self.self_compare,
+                   "prefixes": [g.prefix for g in self.genomes]}
+        files = []
+        if key == "prep":
+            payload["filters"] = asdict(self.filters)
+            for g in self.genomes:
+                fields = ("genome", "gff") if g.mode == "auto" else ("fai", "gff", "pep", "cds")
+                files += [Path(getattr(g, field)) for field in fields if getattr(g, field)]
+                payload[g.prefix] = {"mode": g.mode, "fields": list(fields)}
+        else:
+            for g in self.genomes:
+                if key in ("dotplot", "collinearity", "blockinfo", "circos"):
+                    files += [self.prepared / f"{g.prefix}.{s}" for s in ("gff", "len")]
+                if key in ("blast", "ks"):
+                    files += [self.prepared / f"{g.prefix}.wgdi.pep.fasta"]
+                if key == "ks":
+                    files += [self.prepared / f"{g.prefix}.wgdi.cds.fasta"]
+            if key == "blast":
+                payload.update(engine=self.engine, source=asdict(self.blast_input))
+                if self.blast_input.source == "upload" and self.blast_input.uploaded:
+                    files.append(Path(self.blast_input.uploaded))
+            if key in ("dotplot", "collinearity", "blockinfo"):
+                files += self.outputs("blast")
+            if key in ("ks", "blockinfo"):
+                files += self.outputs("collinearity")
+            if key == "blockinfo" and self.is_done("ks"):
+                files += self.outputs("ks")
+            if key in ("blockks", "kspeaks", "circos"):
+                files += self.outputs("blockinfo")
+            if key in ("dotplot", "blockks", "circos"):
+                payload["names"] = [g.display_name for g in self.genomes]
+        groups = {
+            "blast": ["evalue"],
+            "dotplot": ["evalue", "score", "dot_repeat_number", "dot_markersize", "dot_figsize"],
+            "collinearity": ["evalue", "score", "grading", "mg", "pvalue", "repeat_number_icl", "process"],
+            "ks": ["align_software"], "blockinfo": ["evalue", "score", "repeat_number_bi", "ks_col"],
+            "blockks": [k for k in params if k.startswith("bk_")],
+            "kspeaks": [k for k in params if k.startswith("kp_")] + ["bk_tandem"],
+        }
+        payload["params"] = {k: params[k] for k in groups.get(key, [])}
+        if key == "circos":
+            payload["formats"] = self.formats
+        payload["files"] = [file_stamp(f) for f in files]
+        return fingerprint(payload)
+
+    def reconcile(self) -> None:
+        """Invalidate changed/unverified results before displaying or resuming."""
+        for key, _ in STEPS:
+            if self.is_done(key):
+                entry = self.steps[key]
+                complete = all(f.is_file() and f.stat().st_size > 0 for f in self.outputs(key))
+                from .cache import file_stamp
+                stamps = [file_stamp(f) for f in self.outputs(key)]
+                if not complete or entry.get("signature") != self.input_signature(key) or entry.get("output_stamps") != stamps:
+                    self.reset_from(key)
+                    break
 
     def is_done(self, key: str) -> bool:
         return self.step_state(key) == "done"
@@ -179,6 +283,7 @@ class Project:
             "params": self.params.to_dict(),
             "filters": asdict(self.filters),
             "blast_input": asdict(self.blast_input),
+            "formats": self.formats,
             "genome_a": asdict(self.genome_a),
             "genome_b": asdict(self.genome_b) if self.genome_b else None,
             "steps": self.steps,
@@ -209,10 +314,12 @@ class Project:
             params=WgdiParams.from_dict(data.get("params", {})),
             filters=Filters(**(data.get("filters") or {})),
             blast_input=BlastInput(**(data.get("blast_input") or {})),
+            formats=data.get("formats", ["pdf", "svg", "png"]),
             steps=data.get("steps", {}),
             app_version=data.get("app_version", ""),
             created=float(data.get("created", time.time())),
         )
+        project.reconcile()
         return project
 
     # --- factory --------------------------------------------------------

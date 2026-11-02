@@ -32,6 +32,7 @@ class FaiRecord:
     offset: int
     linebases: int
     linewidth: int
+    irregular: bool = False
 
     @property
     def int32_unsafe(self) -> bool:
@@ -91,17 +92,20 @@ def index_fasta(path: Path, progress: Progress = None) -> tuple[list[FaiRecord],
     linewidth = 0
     last_report = 0
     ragged = 0
+    previous_width: tuple[int, int] | None = None
+    irregular = False
 
     def flush() -> None:
-        nonlocal name, length, start, linebases, linewidth
+        nonlocal name, length, start, linebases, linewidth, previous_width, irregular
         if name is not None:
             if length == 0:
                 issues.append(Issue("warning", name, "序列为空，已跳过"))
             elif linebases == 0:
                 issues.append(Issue("error", name, "没有序列行"))
             else:
-                records.append(FaiRecord(name, length, start, linebases, linewidth))
+                records.append(FaiRecord(name, length, start, linebases, linewidth, irregular))
         name, length, linebases, linewidth = None, 0, 0, 0
+        previous_width, irregular = None, False
 
     for pos, line, eol in _iter_lines(path):
         if progress is not None and pos - last_report > (64 << 20):
@@ -121,10 +125,15 @@ def index_fasta(path: Path, progress: Progress = None) -> tuple[list[FaiRecord],
             continue
         bases = len(line)
         length += bases
+        if previous_width is not None and previous_width != (linebases, linewidth):
+            ragged += 1
+            irregular = True
         if linebases == 0:
             linebases, linewidth = bases, bases + eol
         elif bases > linebases or bases + eol > linewidth:
             ragged += 1
+            irregular = True
+        previous_width = (bases, bases + eol)
     flush()
     if progress is not None:
         progress(total, total)
@@ -244,6 +253,8 @@ def needs_rewrap(records: list[FaiRecord], width: int = DEFAULT_WIDTH) -> tuple[
     """
     if not records:
         return False, ""
+    if any(r.irregular for r in records):
+        return True, "序列内部换行宽度不一致，需先重排后才能随机读取"
     singles = [r for r in records if r.single_line]
     if singles:
         return True, (f"{len(singles)} 条序列整条写在一行（如 {singles[0].name}，"

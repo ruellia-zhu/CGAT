@@ -24,6 +24,11 @@ def _open(path: Path):
     return path.open("r", encoding="utf-8", errors="replace")
 
 
+def _lines(path: Path):
+    with _open(path) as handle:
+        yield from handle
+
+
 # --- .len -------------------------------------------------------------------
 def read_len(path: Path, name: str, label: str | None = None) -> tuple[Genome, list[Issue]]:
     """Read chromosome lengths. Column 3 (gene count) is optional."""
@@ -32,7 +37,7 @@ def read_len(path: Path, name: str, label: str | None = None) -> tuple[Genome, l
         raise WgdiError(f"找不到文件：{path}")
     issues: list[Issue] = []
     chroms: list[Chromosome] = []
-    for lineno, line in enumerate(_open(path), 1):
+    for lineno, line in enumerate(_lines(path), 1):
         s = line.strip()
         if not s or s.startswith("#"):
             continue
@@ -74,7 +79,7 @@ def read_gff(genome: Genome, path: Path, exclude: re.Pattern | None = EXCLUDE_RE
     known = {c.name: c.length for c in genome.chromosomes}
     unknown: set[str] = set()
     bad_coord = dup_id = dup_order = 0
-    for lineno, line in enumerate(_open(path), 1):
+    for lineno, line in enumerate(_lines(path), 1):
         s = line.strip()
         if not s or s.startswith("#"):
             continue
@@ -246,7 +251,7 @@ def probe_gff(path: Path) -> Probe:
     genes = 0
     chroms: set[str] = set()
     bad = 0
-    for line in _open(path):
+    for line in _lines(path):
         s = line.strip()
         if not s or s.startswith("#"):
             continue

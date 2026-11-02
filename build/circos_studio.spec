@@ -12,11 +12,20 @@ Produces a one-folder build:
 Build:  build\\build.cmd
 """
 
+# Keep unrelated host DLLs out of the distribution.
+import os
+import sys
+from pathlib import Path
+os.environ["PATH"] = os.pathsep.join([str(Path(sys.base_prefix)), str(Path(sys.base_prefix) / "DLLs"),
+                                    os.path.join(os.environ["SystemRoot"], "System32"), os.environ["SystemRoot"]])
+
 a = Analysis(
     ["..\\main.py"],
     pathex=[".."],
     binaries=[],
-    datas=[("..\\app\\resources\\splash.png", "app\\resources")],
+    datas=[("..\\app\\resources\\splash.png", "app\\resources"),
+           ("..\\app\\wgdi\\runner.py", "app\\wgdi"),
+           ("..\\app\\wgdi\\ks_inputs.py", "app\\wgdi")],
     hiddenimports=[
         "matplotlib.backends.backend_agg",
         "matplotlib.backends.backend_pdf",

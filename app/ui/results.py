@@ -37,6 +37,8 @@ EXTRAS = [
     ("Ks 结果", "{stem}.ks"),
     ("blastp 结果", "{stem}.blastp.txt"),
     ("Circos PDF", "{stem}.pdf"),
+    ("Circos SVG", "{stem}.svg"),
+    ("Circos PNG", "{stem}.png"),
 ]
 
 
@@ -122,8 +124,13 @@ class ResultsDialog(QDialog):
 
         found = 0
         for label, pattern in FIGURES:
+            key = {"点阵图": "dotplot", "Ks 点阵图": "blockks", "Ks 分布": "kspeaks", "Circos": "circos"}[label]
+            if not self.project.is_done(key):
+                continue
             folder = self.project.results if label == "Circos" else self.project.work
             path = folder / pattern.format(stem=stem)
+            if label == "Circos" and not path.exists():
+                path = next((f for f in self.project.outputs("circos") if f.exists()), path)
             if not path.exists():
                 continue
             grid.addWidget(_Thumb(label, path, t), found // 2, found % 2)
@@ -138,6 +145,9 @@ class ResultsDialog(QDialog):
         files = QListWidget()
         files.setFixedHeight(110)
         for label, pattern in EXTRAS:
+            key = {"块信息": "blockinfo", "共线性": "collinearity", "Ks 结果": "ks", "blastp 结果": "blast"}.get(label, "circos")
+            if not self.project.is_done(key):
+                continue
             path = self.project.work / pattern.format(stem=stem)
             if not path.exists():
                 path = self.project.results / pattern.format(stem=stem)

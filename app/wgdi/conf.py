@@ -79,7 +79,9 @@ def render(files1: GenomeFiles, files2: GenomeFiles, stem: str,
            name1: str, name2: str, params: WgdiParams, *,
            with_ks: bool = True, blast_file: str | None = None,
            muscle_path: str | None = None, pal2nal_path: str | None = None,
-           yn00_path: str | None = None) -> str:
+           yn00_path: str | None = None, mafft_path: str | None = None,
+           perl_path: str | None = None, ks_available: bool | None = None,
+           align_threads: int = 8) -> str:
     """Return the text of total.conf.
 
     `stem` prefixes every output file, e.g. ``Sjap-Mtrun``.
@@ -136,8 +138,9 @@ savefile = {collinearity}
 """)
 
     if with_ks and files1.pep and files2.pep and files1.cds and files2.cds:
-        pep = files1.pep if files1.pep == files2.pep else f"{files1.pep};{files2.pep}"
-        cds = files1.cds if files1.cds == files2.cds else f"{files1.cds};{files2.cds}"
+        if files1.pep != files2.pep or files1.cds != files2.cds:
+            raise ValueError("WGDI Ks 需要单个合并后的蛋白和 CDS 输入文件")
+        pep, cds = files1.pep, files1.cds
         tool = ""
         if muscle_path:
             tool += f"muscle_path = {muscle_path}\n"
@@ -145,10 +148,15 @@ savefile = {collinearity}
             tool += f"pal2nal_path = {pal2nal_path}\n"
         if yn00_path:
             tool += f"yn00_path = {yn00_path}\n"
+        if mafft_path:
+            tool += f"mafft_path = {mafft_path}\n"
+        if perl_path:
+            tool += f"perl_path = {perl_path}\n"
         parts.append(f"""[ks]
 cds_file = {cds}
 pep_file = {pep}
 align_software = {params.align_software}
+align_threads = {max(1, min(8, align_threads))}
 {tool}pairs_file = {collinearity}
 ks_file = {ks}
 """)
@@ -167,7 +175,7 @@ position = order
 """
     # wgdi's block_info reads self.ks before checking hasattr, so the key must
     # be present even when no Ks file is used.
-    if with_ks:
+    if (with_ks if ks_available is None else ks_available):
         info += f"ks = {ks}\nks_col = {params.ks_col}\n"
     else:
         info += "ks = none\n"
@@ -221,7 +229,8 @@ def for_self(files: GenomeFiles, stem: str, name: str, params: WgdiParams,
            yn00_path: str | None = None) -> str:
     """Self comparison: both sides point at the same files."""
     return render(files, files, stem, name, name, params,
-                  with_ks=with_ks, blast_file=blast_file, muscle_path=muscle_path)
+                  with_ks=with_ks, blast_file=blast_file, muscle_path=muscle_path,
+                  pal2nal_path=pal2nal_path, yn00_path=yn00_path)
 
 
 def with_overrides(params: WgdiParams, **kwargs) -> WgdiParams:

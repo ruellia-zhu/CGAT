@@ -18,6 +18,7 @@ build/downloads/
 
 # ---- 构建产物 ----
 build/work/
+build/bugfix_*/
 dist/
 *.exe
 *.zip
@@ -32,7 +33,14 @@ dev-docs/
 
 # ---- 测试与验证脚本：保留在本地，不进仓库 ----
 #（这些脚本依赖本机的 共线性分析 数据集，别人拿走也跑不起来）
-tests/
+tests/*
+# 不依赖本机数据的可移植回归测试随源码保留
+!tests/test_blast_direction.py
+!tests/test_logic_103.py
+!tests/test_wgdi_compat.py
+!tests/test_fai.py
+!tests/test_prep.py
+!tests/test_core.py
 tools/check_*.py
 tools/smoke_ui.py
 

@@ -280,9 +280,8 @@ class MainWindow(QWidget):
         root.setSpacing(0)
 
         self.title_bar = TitleBar(self)
-        self.page_switch = SegmentedControl(["全流程分析", "仅绘图"], height=30)
-        self.page_switch.setFixedWidth(190)
-        self.page_switch.set_current(1)
+        self.page_switch = SegmentedControl(["WGDI 全流程分析", "仅绘图"], height=30)
+        self.page_switch.setFixedWidth(245)
         self.page_switch.changed.connect(self._on_page_changed)
         self.title_bar.add_switch(self.page_switch)
         root.addWidget(self.title_bar)
@@ -293,6 +292,7 @@ class MainWindow(QWidget):
         self.analysis_panel.run_all_requested.connect(self._wizard_run_all)
         self.analysis_panel.notified.connect(self.analysis_stage.append)
         self.analysis_panel.step_changed.connect(self._wizard_step_changed)
+        self.analysis_panel.project_loaded.connect(lambda p: self.analysis_stage.set_project(p))
         self.analysis_stage.cancel_requested.connect(self._cancel_analysis)
         self.analysis_stage.load_requested.connect(self._load_project)
         self.analysis_stage.results_requested.connect(self._show_results)
@@ -307,8 +307,8 @@ class MainWindow(QWidget):
         self.stage_stack.addWidget(self._build_stage(t))
         self.panel_stack.setFrameShape(QFrame.NoFrame)
         self.stage_stack.setFrameShape(QFrame.NoFrame)
-        self.panel_stack.setCurrentIndex(1)
-        self.stage_stack.setCurrentIndex(1)
+        self.panel_stack.setCurrentIndex(0)
+        self.stage_stack.setCurrentIndex(0)
         self._wizard_step_changed(self.analysis_panel.current_key())
 
         body = QHBoxLayout()
@@ -324,6 +324,7 @@ class MainWindow(QWidget):
             self.restoreGeometry(geo)
         self._load_demo()
         self._refresh_state()
+        self._on_page_changed(0)
         if geo is None:
             self._center()
 
@@ -606,15 +607,16 @@ class MainWindow(QWidget):
             self.analysis_stage.append("上一步还在运行，先取消或等它结束")
             return
         rt = runtime_mod.discover()
-        needed = keys or [self.analysis_panel.current_key()]
+        from ..wgdi.pipeline import Pipeline
+        from ..wgdi.project import STEPS
+        needed = keys or [key for key, _ in STEPS if not project.is_done(key)]
         for key in needed:
-            probe = PipelineWorker(project, rt, [key])
-            ok, reason = probe.pipeline.can_run(key) if probe.pipeline else (True, "")
+            if key == "ks" and not rt.has_ks:
+                continue
+            ok, reason = Pipeline(project, runtime=rt).can_run(key)
             if not ok:
                 self.analysis_stage.append(f"{key} 无法运行：{reason}")
-                if keys is None:
-                    return
-                continue
+                return
         self.analysis_stage.set_project(project)
         self.analysis_stage.set_running(True)
         self.analysis_panel.set_running(True)
@@ -650,9 +652,6 @@ class MainWindow(QWidget):
         if worker is not None and worker.pipeline is not None:
             self.analysis_stage.append("正在取消…")
             worker.pipeline.cancel()
-            worker.wait(5000)
-        self.analysis_stage.set_running(False)
-        self.analysis_panel.set_running(False)
 
     def _load_project(self, root: str) -> None:
         """Point the plotting slots at a finished project and switch pages."""

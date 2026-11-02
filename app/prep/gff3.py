@@ -44,13 +44,21 @@ class Transcript:
     strand: str
     cds_len: int = 0
     cds: list[tuple[int, int]] = field(default_factory=list)
+    phases: dict[tuple[int, int], int] = field(default_factory=dict)
 
     def finalize(self) -> None:
         if self.cds:
             self.cds.sort()
             self.cds_len = sum(e - s + 1 for s, e in self.cds)
-            self.start = min(self.start, self.cds[0][0])
+            self.start = min(self.start, self.cds[0][0]) if self.start > 0 else self.cds[0][0]
             self.end = max(self.end, self.cds[-1][1])
+
+    @property
+    def initial_phase(self) -> int:
+        if not self.cds:
+            return 0
+        first = max(self.cds) if self.strand == "-" else min(self.cds)
+        return self.phases.get(first, 0)
 
 
 @dataclass(frozen=True)
@@ -102,6 +110,8 @@ def read_annotation(path: Path) -> tuple[dict[str, Transcript], list[Issue]]:
                 continue
             if begin > finish:
                 begin, finish = finish, begin
+            if begin < 1:
+                raise WgdiError(f"{path.name}:{lineno} 坐标必须从 1 开始")
 
             if ftype_l in GENE_TYPES:
                 gene_rows += 1
@@ -118,20 +128,28 @@ def read_annotation(path: Path) -> tuple[dict[str, Transcript], list[Issue]]:
 
             if ftype_l != "cds":
                 continue
-            tx, gene = _tx_key(attrs, "cds") or (None, None)
-            if not tx:
+            parents = attrs.get("transcript_id") or attrs.get("Parent") or attrs.get("ID")
+            if not parents:
                 continue
-            record = transcripts.get(tx)
-            if record is None:
+            if _phase not in (".", "0", "1", "2"):
+                raise WgdiError(f"{path.name}:{lineno} CDS phase 必须是 0、1、2 或 .")
+            for tx in (p.strip() for p in parents.split(",") if p.strip()):
+                gene = attrs.get("gene_id") or attrs.get("gene") or tx
                 stash = cds_only.setdefault(tx, {"gene": gene or tx, "chrom": chrom,
-                                                 "strand": strand, "segs": []})
+                                                 "strand": strand, "segs": [], "phases": {}})
+                if (stash["chrom"], stash["strand"]) != (chrom, strand):
+                    raise WgdiError(f"转录本 {tx} 的 CDS 染色体或方向不一致")
                 stash["segs"].append((begin, finish))
-                continue
-            record.cds.append((begin, finish))
+                stash["phases"][(begin, finish)] = int(_phase) if _phase != "." else 0
 
     for tx, stash in cds_only.items():
-        record = Transcript(tx, stash["gene"], stash["chrom"], 0, 0, stash["strand"])
-        record.cds = list(stash["segs"])
+        record = transcripts.get(tx)
+        if record is None:
+            record = Transcript(tx, stash["gene"], stash["chrom"], 0, 0, stash["strand"])
+        if (record.chrom, record.strand) != (stash["chrom"], stash["strand"]):
+            raise WgdiError(f"转录本 {tx} 与其 CDS 的染色体或方向不一致")
+        record.cds = sorted(set(stash["segs"]))
+        record.phases = stash["phases"]
         record.finalize()
         transcripts[tx] = record
 
@@ -165,9 +183,9 @@ def choose_longest(transcripts: dict[str, Transcript]) -> tuple[list[GeneChoice]
 
     choices: list[GeneChoice] = []
     for gene_id, group in by_gene.items():
-        def rank(t: Transcript) -> tuple[int, int, str]:
+        def rank(t: Transcript) -> tuple[int, int, int, str]:
             span = t.end - t.start + 1
-            return (-t.cds_len if t.cds_len else -span, len(t.cds), t.tx_id)
+            return (0 if t.cds_len else 1, -t.cds_len if t.cds_len else -span, len(t.cds), t.tx_id)
 
         best = min(group, key=rank)
         choices.append(GeneChoice(gene_id, best, len(group) - 1))

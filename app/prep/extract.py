@@ -43,6 +43,8 @@ class FastaReader:
 
     def __init__(self, path: Path, records: list[FaiRecord]):
         self.path = Path(path)
+        if any(r.irregular for r in records):
+            raise WgdiError("FASTA 换行宽度不一致，请先重排后重新索引")
         self.by_name = {r.name: r for r in records}
         if not self.path.exists():
             raise WgdiError(f"找不到基因组文件：{self.path}")
@@ -79,7 +81,10 @@ class FastaReader:
         end_byte = rec.offset_of(end - 1) + 1
         self._handle.seek(begin_byte)
         raw = self._handle.read(end_byte - begin_byte)
-        return raw.replace(b"\n", b"").replace(b"\r", b"")
+        seq = raw.replace(b"\n", b"").replace(b"\r", b"")
+        if len(seq) != end - start + 1 or b">" in seq:
+            raise WgdiError(f"{name} 提取长度与坐标不一致，请检查 FASTA 换行和索引")
+        return seq
 
     def fetch_segments(self, name: str, segments: list[tuple[int, int]], strand: str) -> bytes:
         chunks = [self.fetch(name, s, e) for s, e in sorted(segments)]

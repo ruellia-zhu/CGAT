@@ -26,6 +26,7 @@ from .. import build_info as info
 from ..wgdi.pipeline import Listener, Pipeline
 from ..wgdi.conf import WgdiParams
 from ..wgdi.project import STEPS, Filters, GenomeInput, Project, default_projects_dir
+from ..core.issues import WgdiError
 from . import icons, theme
 from .widgets import Card, Check, SectionHeader, SegmentedControl
 
@@ -224,8 +225,8 @@ class GenomeBox(Card):
         mode = "auto" if self.mode.current() == 0 else "manual"
         data = {k: (v.text().strip() or None) for k, v in self.fields.items()}
         name = self.display.text().strip()
-        prefix = _prefix_from(name or data.get("genome") or data.get("fai")
-                              or data.get("pep") or fallback)
+        # File keys are stable and distinct; editing a label must not rename data.
+        prefix = fallback
         return GenomeInput(prefix=prefix, mode=mode, genome=data.get("genome"),
                            gff=data.get("gff"), pep=data.get("pep"), cds=data.get("cds"),
                            fai=data.get("fai"), display_name=name)
@@ -311,6 +312,7 @@ class StepRow(QWidget):
 class WizardPanel(QWidget):
     run_requested = Signal(str)
     run_all_requested = Signal()
+    project_loaded = Signal(object)
     notified = Signal(str)
     step_changed = Signal(str)
 
@@ -322,6 +324,8 @@ class WizardPanel(QWidget):
         self._rows: dict[str, StepRow] = {}
         self._forms: dict[str, QWidget] = {}
         self._widgets: dict[str, dict] = {}
+        self._syncing_params = False
+        self._running = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -346,6 +350,7 @@ class WizardPanel(QWidget):
 
         self.forms = QStackedWidget()
         self._build_forms()
+        self._bind_shared_params()
         v.addWidget(self.forms)
         v.addStretch(1)
         scroll.setWidget(inner)
@@ -423,6 +428,18 @@ class WizardPanel(QWidget):
         self.name_edit = QLineEdit("analysis")
         self.name_edit.setFixedHeight(25)
         self.name_edit.setPlaceholderText("项目名")
+        actions = QHBoxLayout()
+        self.open_project_btn = QPushButton("打开已有项目")
+        self.open_project_btn.clicked.connect(self._choose_project)
+        self.new_project_btn = QPushButton("新建项目")
+        self.new_project_btn.clicked.connect(self._new_project)
+        for button in (self.open_project_btn, self.new_project_btn):
+            button.setObjectName("ghost")
+            button.setFixedHeight(28)
+            button.setCursor(Qt.PointingHandCursor)
+        actions.addWidget(self.open_project_btn)
+        actions.addWidget(self.new_project_btn)
+        card.add(_row(actions))
         browse = QPushButton("…")
         browse.setObjectName("ghost")
         browse.setFixedSize(28, 25)
@@ -482,7 +499,7 @@ class WizardPanel(QWidget):
         spec.setSpacing(6)
         spec.addWidget(_tiny("线程"))
         self.threads = QSpinBox()
-        self.threads.setRange(1, 64)
+        self.threads.setRange(1, 8)
         self.threads.setValue(_default_threads())
         self.threads.setFixedSize(52, 25)
         spec.addWidget(self.threads)
@@ -513,7 +530,7 @@ class WizardPanel(QWidget):
         pick.clicked.connect(self._pick_blast)
         up_lay.addWidget(self.upload_edit)
         up_lay.addWidget(pick)
-        up_note = QLabel("至少 6 列（outfmt 6 默认 12 列），第一列是查询蛋白 ID。")
+        up_note = QLabel("需要完整的 outfmt 6 比对表（12 列），第一列是查询蛋白 ID。")
         up_note.setWordWrap(True)
         up_note.setStyleSheet(f"font-size:10px;color:{theme.theme()['ink3']};background:transparent;")
         up_lay.addWidget(up_note)
@@ -532,11 +549,17 @@ class WizardPanel(QWidget):
             if kind == "int":
                 widget = QSpinBox()
                 widget.setRange(0, 1_000_000)
+                if attr == "process":
+                    widget.setRange(1, 8)
                 widget.setFixedSize(78, 25)
             elif kind == "bool":
                 widget = Check("启用")
             elif kind == "align":
                 widget = SegmentedControl(["muscle", "mafft"], height=25)
+                from ..wgdi.runtime import discover
+                if "mafft" not in discover().bins:
+                    widget._buttons[1].setEnabled(False)
+                    widget._buttons[1].setToolTip("未找到本机 MAFFT，请安装后重新打开程序")
             else:
                 widget = QLineEdit()
                 widget.setFixedHeight(25)
@@ -571,6 +594,30 @@ class WizardPanel(QWidget):
         return self._wrap(card)
 
     # --- 状态 ---------------------------------------------------------
+    def _bind_shared_params(self) -> None:
+        self._param_controls = {"evalue": [self.evalue]}
+        for store in self._widgets.values():
+            for attr, widget in store.items():
+                self._param_controls.setdefault(attr, []).append(widget)
+        for attr, controls in self._param_controls.items():
+            for widget in controls:
+                signal = widget.valueChanged if isinstance(widget, QSpinBox) else (
+                    widget.toggled if isinstance(widget, Check) else (
+                        widget.changed if isinstance(widget, SegmentedControl) else widget.textChanged))
+                signal.connect(lambda _value, a=attr, w=widget: self._share_param(a, w))
+
+    def _share_param(self, attr, source) -> None:
+        if self._syncing_params:
+            return
+        self._syncing_params = True
+        try:
+            value = self._read_param(attr, source)
+            for widget in self._param_controls[attr]:
+                if widget is not source:
+                    _seed(widget, value)
+        finally:
+            self._syncing_params = False
+
     def current_key(self) -> str:
         return self._current
 
@@ -604,6 +651,8 @@ class WizardPanel(QWidget):
         upload = project.blast_input.source == "upload"
         self.blast_mode.set_current(1 if upload else 0, emit=True)
         self.upload_edit.setText(project.blast_input.uploaded or "")
+        for fmt, widget in (("pdf", self.fmt_pdf), ("svg", self.fmt_svg), ("png", self.fmt_png)):
+            widget.setChecked(fmt in project.formats)
         for _key, store in self._widgets.items():
             for attr, widget in store.items():
                 _seed(widget, getattr(project.params, attr, ""))
@@ -627,11 +676,35 @@ class WizardPanel(QWidget):
             self.run_btn.setText("运行本步")
 
     def set_running(self, running: bool) -> None:
+        self._running = running
+        self.forms.setEnabled(not running)
         self.run_btn.setEnabled(not running)
         self.prev_btn.setEnabled(not running and KEYS.index(self._current) > 0)
         self.next_btn.setEnabled(False if running else self.next_btn.isEnabled())
 
     # --- 交互 ---------------------------------------------------------
+    def _choose_project(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "打开分析项目（包含 project.json 的目录）", self.dir_edit.text())
+        if path:
+            try:
+                self.open_project(Path(path))
+            except (WgdiError, OSError, ValueError) as exc:
+                self.notified.emit(f"无法打开项目：{exc}")
+
+    def open_project(self, root: Path) -> None:
+        project = Project.load(root)
+        self.set_project(project)
+        self.select(next((k for k in KEYS if not project.is_done(k)), KEYS[-1]))
+        self.project_loaded.emit(project)
+        self.notified.emit(f"已打开项目：{project.root}")
+
+    def _new_project(self) -> None:
+        self.set_project(Project(Path(self.dir_edit.text()) / "analysis", name="analysis"))
+        self._project = None
+        self.select("prep")
+        self.refresh_states()
+        self.project_loaded.emit(None)
+
     def _choose_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "选择项目所在目录", self.dir_edit.text())
         if path:
@@ -713,8 +786,14 @@ class WizardPanel(QWidget):
             self._project = project
             self.notified.emit(f"项目：{project.root}")
             self._project = project
+            self.apply_to(project)
             self.set_project(project)
-        self.apply_to(self._project)
+        try:
+            self.apply_to(self._project)
+            self._project.validate()
+        except (WgdiError, ValueError, re.error) as exc:
+            self.notified.emit(f"设置有误：{exc}")
+            return None
         self._project.save()
         return self._project
 
@@ -732,6 +811,8 @@ class WizardPanel(QWidget):
             strip_prefix=self.strip_prefix.text().strip())
         project.engine = "diamond" if self.engine.current() == 1 else "blastp"
         project.threads = self.threads.value()
+        project.formats = [fmt for fmt, widget in (("pdf", self.fmt_pdf), ("svg", self.fmt_svg), ("png", self.fmt_png))
+                           if widget.isChecked()]
         updates: dict[str, object] = {"evalue": self.evalue.text().strip() or "1e-5"}
         for key, store in self._widgets.items():
             for attr, widget in store.items():
@@ -747,6 +828,8 @@ class WizardPanel(QWidget):
         else:
             project.blast_input.source = "run"
             project.blast_input.uploaded = None
+        project.reconcile()
+        project.app_version = info.VERSION
 
 
 def _seed(widget, value) -> None:
@@ -877,11 +960,12 @@ class PreviewStage(QWidget):
             self.pane.show_preview(preview_mod.build(self._project, self._key))
         stem = self._project.stem if self._project else ""
         self.load_btn.setEnabled(bool(stem) and self._project is not None
-                                 and (self._project.results / f"{stem}.pdf").exists())
+                                 and self._project.is_done("blockinfo"))
         figures = 0
         if self._project is not None:
-            figures = len(list(self._project.work.glob(f"{stem}*.png"))) + \
-                len(list(self._project.results.glob(f"{stem}*.png")))
+            figures = sum(1 for key in ("dotplot", "blockks", "kspeaks", "circos")
+                          if self._project.is_done(key) for path in self._project.outputs(key)
+                          if path.exists())
         self.results_btn.setEnabled(figures > 0)
 
     def append(self, message: str) -> None:

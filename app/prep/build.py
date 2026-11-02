@@ -175,13 +175,17 @@ def prepare_auto(
     cds_items: list[tuple[str, str]] = []
     pep_items: list[tuple[str, str]] = []
     missing_cds = 0
+    coding_choices = []
     with FastaReader(genome_fa, records) as reader:
         for i, choice in enumerate(choices, 1):
             tx = choice.transcript
             if not tx.cds:
                 missing_cds += 1
                 continue
-            raw = reader.fetch_segments(alias(tx.chrom), tx.cds, tx.strand)
+            if any(s < 1 or e > reader.length(alias(tx.chrom)) for s, e in tx.cds):
+                raise WgdiError(f"转录本 {tx.tx_id} 的 CDS 坐标超出 {tx.chrom} 的长度")
+            raw = reader.fetch_segments(alias(tx.chrom), tx.cds, tx.strand)[tx.initial_phase:]
+            coding_choices.append(choice)
             cds_items.append((choice.gene_id, raw.decode("ascii", "replace")))
             pep_items.append((choice.gene_id, translate(raw)))
             if i % 2000 == 0:
@@ -191,6 +195,7 @@ def prepare_auto(
         issues.append(Issue("warning", annotation.name, f"{missing_cds} 个基因没有 CDS 坐标，已跳过"))
     if not pep_items:
         raise WgdiError("没有提取到任何 CDS，检查注释的 CDS 特征")
+    choices = coding_choices
 
     gff_path = out_dir / f"{prefix}.gff"
     counts: dict[str, int] = {}
@@ -244,28 +249,40 @@ def prepare_manual(
     speak("读取注释…")
     transcripts, ann_issues = gff3_mod.read_annotation(annotation)
     issues += ann_issues
+    allowed = {r.name for r in records}
+    all_transcripts = transcripts
+    transcripts = {k: t for k, t in transcripts.items() if alias(t.chrom) in allowed}
     by_tx = transcripts
-    by_gene = {t.gene_id: t for t in transcripts.values()}
+    longest, _ = gff3_mod.choose_longest(transcripts)
+    by_gene = {c.gene_id: c.transcript for c in longest}
+    original_by_gene = {t.gene_id: t for t in all_transcripts.values()}
 
     speak("校验基因 ID…")
     ids, seqs = _read_fasta_ids(pep_path, progress, "校验蛋白")
     if not ids:
         raise WgdiError(f"{Path(pep_path).name} 里没有序列")
     if len(ids) != len(set(ids)):
-        issues.append(Issue("error", Path(pep_path).name, "蛋白 FASTA 有重复 ID"))
+        raise WgdiError(f"{Path(pep_path).name} 蛋白 FASTA 有重复 ID")
 
     matched: dict[str, gff3_mod.Transcript] = {}
     ident_to_gene: dict[str, str] = {}
     missing: list[str] = []
     by_transcript = 0
     for ident in ids:
+        original = all_transcripts.get(ident) or original_by_gene.get(ident)
+        if original is not None and alias(original.chrom) not in allowed:
+            continue
         tx = by_gene.get(ident)
         if tx is not None:
+            if tx.gene_id in matched:
+                raise WgdiError(f"基因 {tx.gene_id} 在归一化后有重复蛋白，请每基因只提供一个转录本")
             matched[tx.gene_id] = tx
             ident_to_gene[ident] = tx.gene_id
             continue
         tx = by_tx.get(ident)
         if tx is not None:
+            if tx.gene_id in matched:
+                raise WgdiError(f"基因 {tx.gene_id} 的多个转录本出现在蛋白文件中，请每个基因只提供一个转录本")
             matched[tx.gene_id] = tx
             ident_to_gene[ident] = tx.gene_id
             by_transcript += 1
@@ -279,8 +296,16 @@ def prepare_manual(
     if by_transcript:
         issues.append(Issue("info", Path(pep_path).name,
                             f"{by_transcript} 个 ID 是转录本 ID，已按所属基因改名"))
+    if cds_path:
+        cds_ids, _ = _read_fasta_ids(Path(cds_path), None, "")
+        if len(cds_ids) != len(set(cds_ids)):
+            raise WgdiError("CDS FASTA 有重复 ID")
+        if not set(ident_to_gene).issubset(cds_ids):
+            raise WgdiError("保留蛋白的 ID 在 CDS 中有缺失，请提供对应转录本的 CDS")
 
     choices = [gff3_mod.GeneChoice(gene_id, tx, 0) for gene_id, tx in matched.items()]
+    if not choices:
+        raise WgdiError("过滤后没有可用的蛋白编码基因")
 
     gff_path = out_dir / f"{prefix}.gff"
     counts: dict[str, int] = {}
@@ -309,9 +334,8 @@ def prepare_manual(
     if cds_path:
         _rewrite_fasta(Path(cds_path), cds_out, ident_to_gene, progress, "整理 CDS")
         cds_ids, _ = _read_fasta_ids(Path(cds_path), None, "")
-        if set(cds_ids) != set(ids):
-            issues.append(Issue("warning", Path(cds_path).name,
-                                "蛋白与 CDS 的 ID 集合不一致，Ks 计算可能受影响"))
+        if not set(ident_to_gene).issubset(cds_ids):
+            raise WgdiError("保留蛋白的 ID 在 CDS 中有缺失，请提供对应转录本的 CDS")
     speak(f"完成：{len(choices):,} 个基因，{sequences} 条染色体")
     result = PreparedGenome(prefix, gff_path, out_dir / f"{prefix}.len",
                             pep_out, cds_out, out_fai, None,

@@ -12,6 +12,7 @@ override (a conda environment, say) wins over both.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,11 +25,22 @@ BINARIES = {
     "muscle": "muscle.exe",
     "seqkit": "seqkit.exe",
     "diamond": "diamond.exe",
+    "mafft": "mafft.exe",
 }
 REQUIRED = ("blastp", "makeblastdb", "muscle")
 # Ks needs Perl + pal2nal + PAML's yn00; without them the ks steps are skipped
 KS_TOOLS = ("perl", "pal2nal", "yn00")
 _VERSION_CACHE: dict[str, str] = {}
+_MAFFT_CACHE: dict[tuple[str, int, int], bool] = {}
+
+
+def usable_mafft(exe: Path) -> bool:
+    stat = exe.stat()
+    key = (str(exe), stat.st_size, stat.st_mtime_ns)
+    if key not in _MAFFT_CACHE:
+        output = _run([str(exe), "--version"], timeout=15)
+        _MAFFT_CACHE[key] = bool(re.search(r"(?im)^\s*(?:mafft\s+)?v?\d+\.\d+(?:\.\d+)?(?:\s|$)", output))
+    return _MAFFT_CACHE[key]
 
 
 def app_root() -> Path:
@@ -83,6 +95,11 @@ class Runtime:
         # wgdi draws with matplotlib.pyplot; without a fixed backend it tries a
         # GUI one and dies in a background process.
         env["MPLBACKEND"] = "Agg"
+        env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+            env[key] = "1"  # Avoid BLAS threads multiplying WGDI worker counts.
         extra = [str(p.parent) for p in self.bins.values()]
         if extra:
             env["PATH"] = os.pathsep.join(extra + [env.get("PATH", "")])
@@ -126,6 +143,9 @@ def discover(override: str | None = None) -> Runtime:
             found = shutil.which(filename.replace(".exe", ""))
             if found:
                 rt.bins[key] = Path(found)
+
+    if "mafft" in rt.bins and not usable_mafft(rt.bins["mafft"]):
+        rt.bins.pop("mafft")
 
     for key in REQUIRED:
         if key not in rt.bins:

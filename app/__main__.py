@@ -129,10 +129,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--selftest", action="store_true", help="render a synthetic figure and exit")
     ap.add_argument("--selftest-ui", action="store_true", help="check window hit testing and exit")
     ap.add_argument("--check-runtime", action="store_true", help="print the external tools and exit")
+    ap.add_argument("--selftest-analysis", metavar="PROJECT", help=argparse.SUPPRESS)
     args, rest = ap.parse_known_args(argv[1:])
 
     if args.check_runtime:
         return _check_runtime()
+    if args.selftest_analysis:
+        from pathlib import Path
+        from .wgdi.pipeline import Pipeline
+        from .wgdi.project import Project
+        results = Pipeline(Project.load(Path(args.selftest_analysis))).run()
+        for result in results:
+            print(result.key, "OK" if result.ok else "FAILED", result.message)
+        return 0 if results and all(r.ok for r in results) else 1
     if args.selftest:
         return _selftest()
     if args.selftest_ui:

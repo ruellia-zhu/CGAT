@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import json
+import uuid
 import shutil
 import subprocess
 import time
@@ -13,6 +15,7 @@ from ..core.issues import WgdiError
 from . import conf as conf_mod
 from .project import STEP_TITLE, STEPS, Project
 from .runtime import Runtime, discover
+from .cache import file_stamp, fingerprint, preserve
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -63,9 +66,11 @@ class Pipeline:
             wanted = ("diamond",) if self.project.engine == "diamond" \
                 else ("blastp", "makeblastdb")
             return [f"缺少 {name}" for name in wanted if name not in self.runtime.bins]
-        problems = list(self.runtime.problems)
+        problems = [] if self.runtime.wgdi else ["缺少 WGDI 运行时"]
         if key == "ks" and not self.runtime.has_ks:
             problems.append("Ks 需要 perl + pal2nal.pl + yn00.exe")
+        if key == "ks" and self.project.params.align_software not in self.runtime.bins:
+            problems.append(f"找不到可用的 {self.project.params.align_software}")
         return problems
 
     def can_run(self, key: str) -> tuple[bool, str]:
@@ -82,10 +87,8 @@ class Pipeline:
         return results[0] if results else StepResult(key, False, message="未执行")
 
     def run(self, only: list[str] | None = None, from_step: str | None = None) -> list[StepResult]:
-        if only and len(only) == 1 and not self.needs_runtime(only[0]):
-            pass
-        elif not self.runtime.ok:
-            raise WgdiError("WGDI 运行时不完整：" + "；".join(self.runtime.problems))
+        self.project.validate()
+        self.project.reconcile()
         keys = [k for k, _ in STEPS]
         if from_step and from_step in keys:
             self.project.reset_from(from_step)
@@ -98,7 +101,7 @@ class Pipeline:
                 break
             try:
                 results.append(self._run_step(key))
-            except WgdiError as exc:
+            except (WgdiError, OSError, ValueError) as exc:
                 self.listener.failed(key, str(exc))
                 self.project.set_step(key, "failed", error=str(exc))
                 self.project.save()
@@ -120,7 +123,28 @@ class Pipeline:
         if self._should_skip(key):
             self.listener.step(key, "skipped")
             return StepResult(key, True, skipped=True)
+        dependencies = {"blast": ["prep"], "dotplot": ["prep", "blast"],
+                        "collinearity": ["prep", "blast"], "ks": ["prep", "collinearity"],
+                        "blockinfo": ["prep", "blast", "collinearity"],
+                        "blockks": ["blockinfo", "ks"], "kspeaks": ["blockinfo", "ks"],
+                        "circos": ["prep", "blockinfo"]}
+        for dependency in dependencies.get(key, []):
+            entry = self.project.steps.get(dependency, {})
+            if entry and entry.get("state") not in ("done", "skipped"):
+                raise WgdiError(f"请先完成 {STEP_TITLE[dependency]}；其旧结果已失效或尚未完成")
         self.listener.step(key, "running")
+        if key != "ks":
+            problems = self.needs_runtime(key)
+            if problems:
+                raise WgdiError("；".join(problems))
+        signature = self.project.input_signature(key)
+        self.project.set_step(key, "running")
+        protected = {Path(g.genome).resolve() for g in self.project.genomes if g.genome}
+        if self.project.blast_input.uploaded:
+            protected.add(Path(self.project.blast_input.uploaded).resolve())
+        for output in self._outputs(key):
+            if output.resolve() not in protected:
+                preserve(output, self.project.root)
         self._t0 = time.time()
         handler = getattr(self, f"_step_{key}", None)
         if handler is None:
@@ -132,8 +156,11 @@ class Pipeline:
             self.project.set_step(key, "skipped", reason=str(exc))
             self.listener.step(key, "skipped")
             return StepResult(key, True, skipped=True, message=str(exc))
+        if any(not path.is_file() or path.stat().st_size == 0 for path in self._outputs(key)):
+            raise WgdiError(f"{STEP_TITLE[key]} 未生成完整、非空的结果，请检查日志")
         duration = time.time() - self._t0
-        self.project.set_step(key, "done", duration=round(duration, 1))
+        self.project.set_step(key, "done", duration=round(duration, 1), signature=signature,
+                              output_stamps=[file_stamp(f) for f in self._outputs(key)])
         self.listener.step(key, "done")
         return StepResult(key, True)
 
@@ -141,23 +168,10 @@ class Pipeline:
         if not self.project.is_done(key):
             return False
         outputs = self._outputs(key)
-        return all(p.exists() for p in outputs) if outputs else True
+        return bool(outputs) and all(p.is_file() and p.stat().st_size > 0 for p in outputs)
 
     def _outputs(self, key: str) -> list[Path]:
-        p = self.project
-        stem = p.stem
-        mapping = {
-            "prep": [p.prepared / f"{p.genome_a.prefix}.gff"],
-            "blast": [p.work / f"{stem}.blastp.txt"],
-            "dotplot": [p.work / f"{stem}.dot.1.png"],
-            "collinearity": [p.work / f"{stem}.collinearity.txt"],
-            "ks": [p.work / f"{stem}.ks"],
-            "blockinfo": [p.work / f"{stem}_block_information.csv"],
-            "blockks": [p.work / f"{stem}.ks.dotplot.png"],
-            "kspeaks": [p.work / f"{stem}.ks_median_distribution.png"],
-            "circos": [p.results / f"{stem}.pdf"],
-        }
-        return mapping.get(key, [])
+        return self.project.outputs(key)
 
     # --- process helpers ------------------------------------------------
     def _run(self, key: str, cmd: list[str], *, cwd: Path | None = None,
@@ -199,18 +213,48 @@ class Pipeline:
 
     def _wgdi(self, key: str, flag: str) -> None:
         assert self.runtime.wgdi is not None
-        conf_path = self._ensure_conf()
-        code = self._run(key, [self.runtime.wgdi, flag, conf_path.name])
+        conf_path = self._ensure_conf(require_blast=key in ("dotplot", "collinearity", "blockinfo"))
+        stopped: list[str] = []
+
+        def inspect_line(line: str) -> None:
+            if "Stoped!" in line or "does not correspond" in line:
+                stopped.append(line)
+
+        cmd = [self.runtime.wgdi, flag, conf_path.name]
+        if flag in ("-ks", "-bk"):
+            if not self.runtime.python:
+                raise WgdiError("WGDI 兼容运行需要 runtime Python")
+            cmd = [self.runtime.python, Path(__file__).with_name("runner.py"), flag, conf_path.name]
+        code = self._run(key, cmd, on_line=inspect_line)
         if code != 0:
             raise WgdiError(f"wgdi {flag} 退出码 {code}，详见 logs")
+        if stopped:
+            raise WgdiError(f"wgdi {flag} 提前停止：{'；'.join(stopped)}，详见 logs")
+        missing = [path.name for path in self._outputs(key) if not path.exists()]
+        if missing:
+            raise WgdiError(f"wgdi {flag} 未生成预期结果：{'、'.join(missing)}，详见 logs")
 
     def _index(self, key: str) -> int:
         return [k for k, _ in STEPS].index(key) + 1
 
     # --- conf ------------------------------------------------------------
-    def _ensure_conf(self) -> Path:
+    def _ensure_conf(self, *, require_blast: bool = False) -> Path:
         p = self.project
         stem = p.stem
+        blast_file = None
+        # Every regenerated total.conf must retain the canonical direction,
+        # including when a later Ks step rewrites the shared configuration.
+        if require_blast or (p.work / f"{stem}.blastp.txt").exists():
+            from .blast import for_wgdi
+
+            b = p.genome_a if p.self_compare or p.genome_b is None else p.genome_b
+            blast_file = for_wgdi(
+                p.work / f"{p.stem}.blastp.txt",
+                p.prepared / f"{p.genome_a.prefix}.gff",
+                p.prepared / f"{b.prefix}.gff",
+                p.work / f"{p.stem}.wgdi.blastp.txt",
+                score=float(p.params.score), evalue=float(p.params.evalue),
+                log=self.listener.log).name
         a = conf_mod.GenomeFiles(
             gff=f"../prepared/{p.genome_a.prefix}.gff",
             len=f"../prepared/{p.genome_a.prefix}.len",
@@ -229,10 +273,17 @@ class Pipeline:
             )
             name_b = p.genome_b.display_name or p.genome_b.prefix
         name_a = p.genome_a.display_name or p.genome_a.prefix
-        ks_ready = ((p.work / f"{stem}.ks").exists()
-                    or ((p.prepared / f"{p.genome_a.prefix}.wgdi.cds.fasta").exists()
-                        and self.runtime.has_ks))
-        with_ks = ks_ready
+        valid_ks = p.is_done("ks") and (p.work / f"{stem}.ks").is_file()
+        inputs_ready = all((p.prepared / f"{g.prefix}.wgdi.cds.fasta").is_file() for g in p.genomes)
+        with_ks = valid_ks or inputs_ready
+        if inputs_ready:
+            from .ks_inputs import merge_inputs
+            merged_pep, merged_cds = merge_inputs(p)
+            a = conf_mod.GenomeFiles(a.gff, a.len, merged_pep, merged_cds)
+            b = conf_mod.GenomeFiles(b.gff, b.len, merged_pep, merged_cds)
+        else:
+            a = conf_mod.GenomeFiles(a.gff, a.len)
+            b = conf_mod.GenomeFiles(b.gff, b.len)
         # wgdi joins muscle/pal2nal into a shell string, so those paths must be
         # quoted; Biopython execs yn00 directly, so that one must stay bare.
         muscle = self.runtime.bins.get("muscle")
@@ -240,9 +291,14 @@ class Pipeline:
         yn00 = self.runtime.bins.get("yn00")
         text = conf_mod.render(
             a, b, stem, name_a, name_b, p.params, with_ks=with_ks,
+            ks_available=valid_ks,
+            align_threads=p.threads,
+            blast_file=blast_file,
             muscle_path=f'"{muscle}"' if muscle else None,
             pal2nal_path=f'"{pal2nal}"' if pal2nal else None,
-            yn00_path=str(yn00) if yn00 else None)
+            yn00_path=str(yn00) if yn00 else None,
+            mafft_path=str(self.runtime.bins["mafft"]) if "mafft" in self.runtime.bins else None,
+            perl_path=str(self.runtime.bins["perl"]) if "perl" in self.runtime.bins else None)
         return conf_mod.write(p.work / "total.conf", text)
 
     # --- individual steps ------------------------------------------------
@@ -263,6 +319,8 @@ class Pipeline:
         log = self.listener.log
 
         def progress(stage: str, done: int, total: int) -> None:
+            if self._cancel:
+                raise WgdiError("已取消")
             self.listener.progress("prep", done, total, None)
 
         filters = self.project.filters
@@ -335,6 +393,8 @@ class Pipeline:
         if src.stat().st_size == 0:
             raise WgdiError(f"{src.name} 是空文件")
 
+        from .blast import validate_table
+        validate_table(src)
         rows = 0
         queries: set[str] = set()
         with src.open("r", encoding="utf-8", errors="replace") as handle:
@@ -363,7 +423,15 @@ class Pipeline:
         self.listener.log(f"导入比对结果：{rows:,} 行，{len(queries):,} 条查询序列")
         target = p.work / f"{p.stem}.blastp.txt"
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, target)
+        if src.resolve() == target.resolve():
+            return target
+        staged = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
+        with src.open(encoding="utf-8-sig") as handle, staged.open("w", encoding="utf-8", newline="") as out:
+            for line in handle:
+                if line.strip() and not line.startswith("#"):
+                    out.write("\t".join(line.split()[:12]) + "\n")
+        preserve(target, p.root)
+        staged.replace(target)
         return target
 
     def _step_blast(self) -> None:
@@ -378,16 +446,18 @@ class Pipeline:
                         else p.genome_b)
         query = p.prepared / f"{query_source.prefix}.wgdi.pep.fasta"
         out = p.work / f"{stem}.blastp.txt"
-        chunks_dir = p.work / "chunks"
+        from .blast import validate_table
+        cache_key = fingerprint({
+            "logic": 3, "engine": p.engine, "evalue": p.params.evalue,
+            "tools": {k: file_stamp(v) for k, v in self.runtime.bins.items()
+                      if k in (p.engine, "makeblastdb")},
+            "query": file_stamp(query, content=True),
+            "db": file_stamp(p.prepared / f"{p.genome_a.prefix}.wgdi.pep.fasta", content=True),
+        })
+        chunks_dir = p.work / "chunks" / cache_key
         chunks_dir.mkdir(parents=True, exist_ok=True)
 
-        previous = self.project.step_detail("blast").get("engine")
-        if previous and previous != p.engine:
-            self.listener.log(f"比对引擎换成 {p.engine}，清掉旧的分块结果")
-            shutil.rmtree(chunks_dir, ignore_errors=True)
-            chunks_dir.mkdir(parents=True, exist_ok=True)
-            out.unlink(missing_ok=True)
-        self.project.set_detail("blast", {"engine": p.engine})
+        self.project.set_detail("blast", {"engine": p.engine, "cache": cache_key})
 
         db = self._build_index()
         self.listener.log(f"比对引擎 {p.engine}，线程 {p.threads}")
@@ -399,29 +469,45 @@ class Pipeline:
             if self._cancel:
                 raise WgdiError("已取消")
             chunk_out = chunk.with_suffix(".m8")
-            if chunk_out.exists() and chunk_out.stat().st_size > 0:
+            marker = chunk_out.with_suffix(".done.json")
+            reusable = False
+            if chunk_out.exists() and marker.exists():
+                try:
+                    reusable = json.loads(marker.read_text(encoding="utf-8")) == file_stamp(chunk_out, content=True)
+                except (OSError, ValueError):
+                    pass
+            if reusable:
                 results.append(chunk_out)
                 self._report_blast(index, len(chunks), started)
                 continue
+            staged = chunk_out.with_name(f"{chunk_out.name}.{uuid.uuid4().hex}.part")
             if p.engine == "diamond":
                 # diamond 只认短选项：-o / -f / -e / -p，且库必须是它自己建的 .dmnd
                 cmd = [self.runtime.bins["diamond"], "blastp",
-                       "-d", str(db), "-q", str(chunk), "-o", str(chunk_out),
+                       "-d", str(db), "-q", str(chunk), "-o", str(staged),
                        "-f", "6", "-e", p.params.evalue, "-p", str(p.threads)]
             else:
                 cmd = [self.runtime.bins["blastp"], "-db", str(db),
-                       "-query", str(chunk), "-out", str(chunk_out),
+                       "-query", str(chunk), "-out", str(staged),
                        "-outfmt", "6", "-evalue", p.params.evalue,
                        "-num_threads", str(p.threads), "-num_alignments", "20"]
             code = self._run("blast", cmd)
             if code != 0:
                 raise WgdiError(f"比对退出码 {code}（第 {index}/{len(chunks)} 块）")
+            validate_table(staged, allow_empty=True)
+            preserve(chunk_out, p.root)
+            staged.replace(chunk_out)
+            marker.write_text(json.dumps(file_stamp(chunk_out, content=True)), encoding="utf-8")
             results.append(chunk_out)
             self._report_blast(index, len(chunks), started)
-        with out.open("wb") as merged:
+        staged_out = out.with_name(f"{out.name}.{uuid.uuid4().hex}.part")
+        with staged_out.open("wb") as merged:
             for path in results:
                 with path.open("rb") as part:
                     shutil.copyfileobj(part, merged)
+        validate_table(staged_out)
+        preserve(out, p.root)
+        staged_out.replace(out)
         self.listener.log(f"合并 {len(results)} 块 → {out.name} "
                           f"({out.stat().st_size / 1e6:.1f} MB)")
 
@@ -432,10 +518,6 @@ class Pipeline:
 
     def _split_fasta(self, source: Path, out_dir: Path, stem: str) -> list[Path]:
         """Split the query into equal-sized chunks so progress is honest."""
-        cache = out_dir / f"{stem}.chunks.json"
-        chunk_files = sorted(out_dir.glob(f"{stem}.q*.faa"))
-        if cache.exists() and chunk_files:
-            return chunk_files
         records: list[tuple[str, list[str]]] = []
         with source.open("r", encoding="utf-8", errors="replace") as handle:
             header, buf = None, []
@@ -472,18 +554,52 @@ class Pipeline:
         if not self.runtime.has_ks:
             raise SkipStep("未安装 Ks 工具链（perl + pal2nal.pl + yn00.exe），"
                            "跳过 Ks；其余步骤与 Circos 不受影响")
-        self._wgdi("ks", "-ks")
+        p = self.project
+        align = p.params.align_software
+        if align not in self.runtime.bins:
+            raise WgdiError(f"未找到 {align}，请选择已安装的比对软件")
+        for g in p.genomes:
+            if not (p.prepared / f"{g.prefix}.wgdi.cds.fasta").is_file():
+                raise SkipStep("没有对应的 CDS，跳过 Ks；共线性与 Circos 可继续")
+        import configparser
+        from .ks_inputs import read_valid_ks
+
+        key = fingerprint({"logic": 3, "input": p.input_signature("ks"),
+                           "files": [file_stamp(p.prepared / f"{g.prefix}.wgdi.{s}.fasta", content=True)
+                                     for g in p.genomes for s in ("pep", "cds")],
+                           "tools": {k: file_stamp(self.runtime.bins[k]) for k in (align, "pal2nal", "yn00", "perl")}})
+        cache_dir = p.work / "ks_cache" / key
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cached = cache_dir / f"{p.stem}.ks"
+        conf_path = self._ensure_conf()
+        config = configparser.ConfigParser()
+        config.read(conf_path, encoding="utf-8")
+        config["ks"]["ks_file"] = str(cached)
+        with conf_path.open("w", encoding="utf-8") as handle:
+            config.write(handle)
+        if not self.runtime.python:
+            raise WgdiError("找不到 Ks 运行时 Python")
+        code = self._run("ks", [self.runtime.python, Path(__file__).with_name("runner.py"), "-ks", conf_path.name])
+        if code != 0:
+            raise WgdiError(f"Ks 计算未完成（退出码 {code}），详见 logs；成功的基因对已保留供重试")
+        valid = read_valid_ks(cached)
+        if not valid:
+            raise WgdiError("没有任何有效的 Ks 结果，未标记成功；请检查序列和工具日志")
+        shutil.copy2(cached, p.work / f"{p.stem}.ks")
+        summary = cached.with_suffix(".summary.json")
+        detail = json.loads(summary.read_text(encoding="utf-8")) if summary.exists() else {"valid": len(valid)}
+        self.project.set_detail("ks", detail)
 
     def _step_blockinfo(self) -> None:
         self._wgdi("blockinfo", "-bi")
 
     def _step_blockks(self) -> None:
-        if not (self.project.work / f"{self.project.stem}.ks").exists():
+        if not self.project.is_done("ks"):
             raise SkipStep("没有 Ks 结果，跳过 Ks 点阵图")
         self._wgdi("blockks", "-bk")
 
     def _step_kspeaks(self) -> None:
-        if not (self.project.work / f"{self.project.stem}.ks").exists():
+        if not self.project.is_done("ks"):
             raise SkipStep("没有 Ks 结果，跳过 Ks 分布图")
         self._wgdi("kspeaks", "-kp")
 
@@ -515,8 +631,8 @@ class Pipeline:
         style = style_mod.replace(style, title=f"{p.stem.replace('-', ' – ')}")
         fig = figure_mod.build_figure(dataset, style)
         try:
-            for fmt in ("pdf", "png"):
+            for fmt in p.formats:
                 export_mod.export(fig, p.results / f"{stem}.{fmt}", fmt, 600)
         finally:
             figure_mod.close(fig)
-        self.listener.log(f"Circos 已输出到 results/{stem}.pdf")
+        self.listener.log(f"Circos 已输出到 {p.results}（{'、'.join(p.formats)}）")

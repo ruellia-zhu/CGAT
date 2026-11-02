@@ -180,6 +180,8 @@ def _ks_histogram(project: Project, values: list[float]) -> Path:
 
 # --- public -------------------------------------------------------------
 def build(project: Project, key: str) -> Preview:
+    if project.steps.get(key, {}).get("invalidated"):
+        return Preview(hint="输入、参数或上游结果已变化，请重新运行本步；旧结果保留在项目中。")
     stem = project.stem
     work = project.work
     prepared = project.prepared
@@ -318,10 +320,12 @@ def build(project: Project, key: str) -> Preview:
     if key == "circos":
         image = project.results / f"{stem}.png"
         pdf = project.results / f"{stem}.pdf"
-        if not image.exists() and not pdf.exists():
+        files = [p for p in project.outputs("circos") if p.exists()]
+        if not files:
             return Preview(hint="本步还没运行。")
         size = pdf.stat().st_size / 1024 if pdf.exists() else 0
-        return Preview(kind="image", title="Circos", image=image if image.exists() else None,
-                       stats=[("PDF", f"{size:,.0f} KB")] if pdf.exists() else [])
+        return Preview(kind="image" if image.exists() else "stats", title="Circos",
+                       image=image if image.exists() else None,
+                       stats=[(p.suffix[1:].upper(), f"{p.stat().st_size / 1024:,.0f} KB") for p in files])
 
     return Preview(hint="未知步骤")
