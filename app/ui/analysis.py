@@ -273,6 +273,10 @@ class StepRow(QWidget):
         self.name = QLabel(f"{index:02d}  {TITLES[key]}")
         lay.addWidget(self.mark)
         lay.addWidget(self.name, 1)
+        self.tag = QLabel("可上传" if key == "blast" else "")
+        self.tag.setStyleSheet(f"font-size:9px;color:{theme.theme()['ink3']};"
+                              "background:transparent;")
+        lay.addWidget(self.tag)
         self.repaint_style()
 
     def set_state(self, state: str) -> None:
@@ -460,9 +464,14 @@ class WizardPanel(QWidget):
     def _form_blast(self) -> QWidget:
         card = Card(padding=9, spacing=6)
         card.add(SectionHeader("2", "比对方式"))
-        self.blast_mode = SegmentedControl(["现在比对", "上传结果"], height=26)
+        self.blast_mode = SegmentedControl(["现在比对", "上传已有结果"], height=26)
         self.blast_mode.changed.connect(self._on_blast_mode)
         card.add(self.blast_mode)
+        tip = QLabel("手上已有 blastp 结果（outfmt 6）就不用重跑，切到右边直接导入。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet(f"font-size:10px;color:{theme.theme()['ink3']};"
+                          "background:transparent;")
+        card.add(tip)
 
         self.blast_run = QWidget()
         run_lay = QVBoxLayout(self.blast_run)
@@ -858,7 +867,10 @@ class PreviewStage(QWidget):
     def refresh(self) -> None:
         if self._project is None:
             self.pane.clear()
-            self.pane.hint.setText("先在左侧填好物种，然后点「运行本步」。")
+            first = KEYS.index(self._key) == 0
+            self.pane.hint.setText(
+                "先在左侧填好物种，然后点「运行本步」。" if first else
+                f"还没有项目。先完成第 1 步「预处理」，再回来做「{TITLES[self._key]}」。")
             self.pane.stack.setCurrentIndex(0)
         else:
             from ..wgdi import preview as preview_mod

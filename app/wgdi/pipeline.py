@@ -308,8 +308,11 @@ class Pipeline:
         assert self.runtime.bins.get("makeblastdb")
         p = self.project
         fasta = p.prepared / f"{p.genome_a.prefix}.wgdi.pep.fasta"
+        # BLAST 2.17 默认写 v5（LMDB）库，路径里有中文时 LMDB 会直接失败；
+        # v4 的 .phr/.pin/.psq 是普通文件，中文路径下可用。
         code = self._run("blastdb", [self.runtime.bins["makeblastdb"],
-                                     "-in", fasta, "-dbtype", "prot"])
+                                     "-in", fasta, "-dbtype", "prot",
+                                     "-blastdb_version", "4"])
         if code != 0:
             raise WgdiError(f"makeblastdb 退出码 {code}")
 
