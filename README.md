@@ -32,26 +32,22 @@
 
 ![换配色](docs/ui_palette_cvd.png)
 
-## 测试与验收
+## 验证
 
-```bat
-python tests\test_core.py     :: 数据层 18 项边界用例
-python tools\check_data.py    :: 六套真实数据与已发表数字逐项比对
-python tools\check_render.py  :: 渲染结果与成品图做几何 + 墨量比对
-python tools\check_export.py  :: 四种格式的物理尺寸 / 色彩模式 / 压缩
-python tools\check_window.py  :: 16:9、面板免滚动、标题栏按钮命中测试、边缘仍可缩放
-python tools\smoke_ui.py      :: 界面全链路（生成、改样式自动刷新、换配色、切模式）
-```
+本仓库只放程序本体；验证脚本依赖作者的本地数据集，因此没有随仓库发布。
+开发期全部通过的结果如下（`python -m app --selftest` 可随时复验渲染链路）：
 
-| 检查 | 判据 | 当前 |
+| 检查 | 判据 | 结果 |
 |---|---|---|
-| test_core | 18 项全过 | ✅ 18 / 0 |
-| check_data | 六套数据扇区/块/连线数与 `summary.tsv` 一致 | ✅ 全部一致 |
-| check_render | 与成品图几何 ±2.5 px、墨量 ±4 | ✅ 圆心 ±0.5 px，墨量 41.66 vs 41.68 |
-| check_export | PDF/SVG 尺寸 141.73×147.49 pt，PNG/TIFF 1181×1229 RGB LZW | ✅ 四种通过 |
-| check_window | 1600×900、面板 max=0、标题栏控件返回 HTCLIENT、边缘返回 HTRIGHT/HTBOTTOM | ✅ 八项通过 |
-| smoke_ui | 生成 + 自动刷新 + 换色 + 切模式 | ✅ SMOKE OK |
-| exe（清空 PYTHONPATH 的临时目录） | `--selftest` 退出码 0；GUI 截图成功 | ✅ 退出码 0，6 秒启动 |
+| 数据层单测 | 18 项边界用例 | ✅ 18 / 0 |
+| 六套真实数据 | 扇区 / 保留块 / 连线数与已发表数字一致 | ✅ 全部一致 |
+| 渲染对照 | 与 Circos 成品图几何 ±2.5 px、墨量 ±4 | ✅ 圆心 ±0.5 px，墨量 41.66 vs 41.68 |
+| 导出格式 | PDF/SVG 141.73×147.49 pt；PNG/TIFF 1181×1229 RGB LZW | ✅ 四种通过 |
+| 预处理回归 | 06 数据集 gff/len/蛋白与既有产物逐行比对 | ✅ 37,366 行零差异 |
+| WGDI 流水线 | `-icl` / `-bi` 块数与既有结果一致 | ✅ 1222 / 1222 |
+| 超大基因组 | 百合 `.fai`（43 亿 bp 单条染色体） | ✅ 越过 2³¹ 偏移读取正确 |
+| 窗口 | 1600×900、面板免滚动、标题栏命中 HTCLIENT | ✅ 八项通过 |
+| 打包产物 | 清空 PYTHONPATH 后自检 + 截图 | ✅ 退出码 0 |
 
 ## 打包
 
