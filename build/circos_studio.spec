@@ -1,7 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller build spec for Circos Studio.
+"""PyInstaller build spec for 比较基因组分析.
 
-Build:  ..\circos_dev\.venv\Scripts\pyinstaller.exe build\circos_studio.spec
+Produces a one-folder build:
+
+    dist/比较基因组分析/
+        比较基因组分析.exe
+        _internal/            Python + PySide6 + matplotlib
+        runtime/              WGDI venv   (copied by build.cmd)
+        bin/                  blastp/muscle/seqkit/perl/pal2nal/yn00 (copied by build.cmd)
+
+Build:  build\\build.cmd
 """
 
 a = Analysis(
@@ -27,10 +35,9 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
-    name="CircosStudio",
+    exclude_binaries=True,
+    name="比较基因组分析",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -44,4 +51,14 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="比较基因组分析",
 )

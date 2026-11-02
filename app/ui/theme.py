@@ -159,6 +159,25 @@ QSlider::handle:horizontal {
 }
 QSlider::handle:horizontal:hover { border-color: $accent_hover; }
 
+/* ---------------- text fields ---------------- */
+QLineEdit {
+    background: $card; border: 1px solid $border; border-radius: 8px;
+    padding: 3px 8px; min-height: 22px; color: $ink; font-size: 12px;
+    selection-background-color: $accent_soft; selection-color: $ink;
+}
+QLineEdit:hover { border-color: $border_strong; }
+QLineEdit:focus { border-color: $accent; }
+QLineEdit:read-only { color: $ink2; }
+QLineEdit::placeholder { color: $ink3; }
+
+QSpinBox {
+    background: $card; border: 1px solid $border; border-radius: 8px;
+    padding: 2px 16px 2px 8px; min-height: 22px; color: $ink; font-size: 12px;
+}
+QSpinBox:hover { border-color: $border_strong; }
+QSpinBox:focus { border-color: $accent; }
+QSpinBox::up-button, QSpinBox::down-button { width: 0; border: none; }
+
 /* ---------------- combo box ---------------- */
 QComboBox {
     background: $card; border: 1px solid $border; border-radius: 8px;

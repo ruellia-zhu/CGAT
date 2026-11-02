@@ -100,22 +100,46 @@ def _selftest_ui() -> int:
     return 0 if ok else 1
 
 
+def _check_runtime() -> int:
+    """Report the external tools found next to the executable."""
+    from . import build_info
+    from .paths import data_root
+    from .wgdi.runtime import discover
+
+    rt = discover()
+    print(f"{build_info.APP_NAME} {build_info.VERSION} ({build_info.BUILD_DATE})")
+    print(f"program   {sys.executable}")
+    print(f"frozen    {getattr(sys, 'frozen', False)}")
+    for key, path in rt.bins.items():
+        print(f"  {key:<12}{path}")
+    print(f"ks        {'yes' if rt.has_ks else 'no'}")
+    print(f"data      {data_root()}")
+    for problem in rt.problems:
+        print(f"problem   {problem}")
+    return 0 if rt.ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
+    from . import build_info as info
+
     argv = list(sys.argv if argv is None else argv)
     ap = argparse.ArgumentParser(prog="circos-studio")
     ap.add_argument("--theme", default="light", choices=("light", "dark"))
     ap.add_argument("--screenshot", metavar="PNG", help="save the window to a PNG and exit")
     ap.add_argument("--selftest", action="store_true", help="render a synthetic figure and exit")
     ap.add_argument("--selftest-ui", action="store_true", help="check window hit testing and exit")
+    ap.add_argument("--check-runtime", action="store_true", help="print the external tools and exit")
     args, rest = ap.parse_known_args(argv[1:])
 
+    if args.check_runtime:
+        return _check_runtime()
     if args.selftest:
         return _selftest()
     if args.selftest_ui:
         return _selftest_ui()
 
     app = QApplication([argv[0]] + rest)
-    app.setApplicationName("Circos Studio")
+    app.setApplicationName(info.APP_NAME)
     theme.apply(app, args.theme)
 
     win = MainWindow(args.theme)

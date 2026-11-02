@@ -10,6 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QStackedWidget,
     QApplication,
     QComboBox,
     QFileDialog,
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from . import icons, theme
 from . import about as about_dialog
+from .analysis import AnalysisPanel, AnalysisStage, PipelineWorker
 from .. import build_info as info
 from ..paths import data_root
 from ..core import palette as palette_mod
@@ -38,6 +40,7 @@ from ..core.model import Dataset
 from ..core.style import Style
 from .worker import ExportWorker, RenderWorker
 from .widgets import (
+    SegmentedControl,
     Card,
     Check,
     DropZone,
@@ -87,6 +90,11 @@ class TitleBar(QWidget):
         tag = QLabel(f"作者：{info.DEVELOPER}；版本：{info.VERSION}")
         tag.setObjectName("appTag")
         lay.addWidget(tag)
+        lay.addSpacing(14)
+        self._switch_slot = QHBoxLayout()
+        self._switch_slot.setContentsMargins(0, 0, 0, 0)
+        self._switch_slot.setSpacing(0)
+        lay.addLayout(self._switch_slot)
         lay.addStretch(1)
 
         about = QToolButton()
@@ -116,6 +124,10 @@ class TitleBar(QWidget):
             b.setToolTip(tip)
             b.clicked.connect(slot)
             lay.addWidget(b)
+
+    def add_switch(self, widget: QWidget) -> None:
+        """Put the page switch in the title bar, next to the app name."""
+        self._switch_slot.addWidget(widget)
 
     def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.LeftButton:
@@ -268,13 +280,35 @@ class MainWindow(QWidget):
         root.setSpacing(0)
 
         self.title_bar = TitleBar(self)
+        self.page_switch = SegmentedControl(["全流程分析", "仅绘图"], height=30)
+        self.page_switch.setFixedWidth(190)
+        self.page_switch.set_current(1)
+        self.page_switch.changed.connect(self._on_page_changed)
+        self.title_bar.add_switch(self.page_switch)
         root.addWidget(self.title_bar)
+
+        self.analysis_panel = AnalysisPanel()
+        self.analysis_stage = AnalysisStage()
+        self.analysis_panel.start_requested.connect(self._start_analysis)
+        self.analysis_stage.load_requested.connect(self._load_project)
+        self.analysis_stage.results_requested.connect(self._show_results)
+        self.analysis_stage.cancel_requested.connect(self._cancel_analysis)
+        self.analysis_panel.cancel_btn.clicked.connect(self._cancel_analysis)
+
+        self.panel_stack = QStackedWidget()
+        self.panel_stack.setFixedWidth(360)
+        self.panel_stack.addWidget(self.analysis_panel)
+        self.panel_stack.addWidget(self._build_panel(t))
+
+        self.stage_stack = QStackedWidget()
+        self.stage_stack.addWidget(self.analysis_stage)
+        self.stage_stack.addWidget(self._build_stage(t))
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
-        body.addWidget(self._build_panel(t))
-        body.addWidget(self._build_stage(t), 1)
+        body.addWidget(self.panel_stack)
+        body.addWidget(self.stage_stack, 1)
         root.addLayout(body, 1)
         root.addWidget(self._build_status(t))
 
@@ -424,17 +458,6 @@ class MainWindow(QWidget):
         fl.setContentsMargins(16, 12, 16, 12)
         fl.setSpacing(8)
 
-        self.btn_analysis = QPushButton("全流程分析")
-        self.btn_analysis.setObjectName("ghost")
-        self.btn_analysis.setCursor(Qt.PointingHandCursor)
-        self.btn_analysis.setIcon(icons.icon("circle-dot", t["ink2"], 15))
-        self.btn_analysis.setIconSize(QSize(15, 15))
-        self.btn_analysis.setMinimumHeight(38)
-        self.btn_analysis.setToolTip(
-            "上传基因组与注释，自动完成 blastp、共线性、Ks、块汇总，并直接出 Circos")
-        self.btn_analysis.clicked.connect(self._on_open_analysis)
-        fl.addWidget(self.btn_analysis, 1)
-
         self.btn_generate = QPushButton("生成图片")
         self.btn_generate.setObjectName("primary")
         self.btn_generate.setToolTip("按当前数据与样式出图；改样式后会自动刷新预览")
@@ -543,15 +566,62 @@ class MainWindow(QWidget):
         return wrap
 
     # -- demo data -------------------------------------------------------
-    def _on_open_analysis(self) -> None:
-        from .analysis import AnalysisDialog
+    # -- page switching --------------------------------------------------
+    def _on_page_changed(self, index: int) -> None:
+        self.panel_stack.setCurrentIndex(index)
+        self.stage_stack.setCurrentIndex(index)
+        if index == 0:
+            for message in self.analysis_panel.messages:
+                self.analysis_stage.append(message)
+            self.analysis_panel.messages.clear()
+            self.status_text.setText("全流程分析 · WGDI 0.75 · blastp / muscle / PAML")
+        else:
+            self._refresh_state()
 
-        dialog = AnalysisDialog(self, self._mode)
-        dialog.load_requested.connect(self._load_project)
-        dialog.exec()
+    def _start_analysis(self, project) -> None:
+        from ..wgdi import runtime as runtime_mod
+
+        for message in self.analysis_panel.messages:
+            self.analysis_stage.append(message)
+        self.analysis_panel.messages.clear()
+
+        rt = runtime_mod.discover()
+        if not rt.ok:
+            for problem in rt.problems:
+                self.analysis_stage.append("✕ " + problem)
+            return
+        if not rt.has_ks:
+            self.analysis_stage.append(
+                "未检测到 Ks 工具链（perl + pal2nal.pl + yn00.exe），Ks 步骤会跳过")
+
+        self._analysis = PipelineWorker(project, rt, self)
+        self._analysis.signals.log.connect(self.analysis_stage.append)
+        self._analysis.signals.step.connect(self.analysis_stage.set_step)
+        self._analysis.signals.progress.connect(self.analysis_stage.set_progress)
+        self._analysis.signals.done.connect(self._analysis_done)
+        self._analysis.signals.failed.connect(self._analysis_failed)
+        self.analysis_stage.begin(project)
+        self.analysis_panel.set_running(True)
+        self._analysis.start()
+
+    def _analysis_done(self, results: list) -> None:
+        self.analysis_stage.finish(results)
+        self.analysis_panel.set_running(False)
+
+    def _analysis_failed(self, message: str) -> None:
+        self.analysis_stage.fail(message)
+        self.analysis_panel.set_running(False)
+
+    def _cancel_analysis(self) -> None:
+        worker = getattr(self, "_analysis", None)
+        if worker is not None and worker.pipeline is not None:
+            self.analysis_stage.append("正在取消…")
+            worker.pipeline.cancel()
+            worker.wait(5000)
+        self.analysis_panel.set_running(False)
 
     def _load_project(self, root: str) -> None:
-        """Point the plotting slots at a finished project's results."""
+        """Point the plotting slots at a finished project and switch pages."""
         from PySide6.QtWidgets import QMessageBox
 
         from ..wgdi.project import Project
@@ -575,7 +645,13 @@ class MainWindow(QWidget):
         for key, path in pairs:
             self._slots[key].set_path(path if path.exists() else None)
         self._refresh_state()
+        self.page_switch.set_current(1, emit=True)
         self._on_generate()
+
+    def _show_results(self, root: str) -> None:
+        from .results import ResultsDialog
+
+        ResultsDialog(Path(root), self._mode, self).exec()
 
     def _load_demo(self) -> None:
         """Open the real dataset 01 so the first screen shows real numbers."""

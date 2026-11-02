@@ -80,6 +80,9 @@ class Runtime:
     def env(self) -> dict[str, str]:
         """Environment for child processes: our bin/ first on PATH."""
         env = dict(os.environ)
+        # wgdi draws with matplotlib.pyplot; without a fixed backend it tries a
+        # GUI one and dies in a background process.
+        env["MPLBACKEND"] = "Agg"
         extra = [str(p.parent) for p in self.bins.values()]
         if extra:
             env["PATH"] = os.pathsep.join(extra + [env.get("PATH", "")])
